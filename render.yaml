@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: telegram-store-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: BOT_TOKEN
+        sync: false
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: SUPPORT_USERNAME
+        sync: false
+      - key: DB_PATH
+        value: /var/data/store.db
+      - key: GOLD_CHANNEL_ID
+        sync: false
+      - key: GOLD_ACCESS_LINK
+        sync: false
+      - key: SILVER_CHANNEL_ID
+        sync: false
+      - key: SILVER_ACCESS_LINK
+        sync: false
+      - key: BRONZE_CHANNEL_ID
+        sync: false
+      - key: BRONZE_ACCESS_LINK
+        sync: false
+      - key: IRON_CHANNEL_ID
+        sync: false
+      - key: IRON_ACCESS_LINK
+        sync: false

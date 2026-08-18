@@ -1,38 +1,21 @@
 services:
   - type: web
-    name: telegram-store-bot
+    name: dark-store-bot
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
-    healthCheckPath: /health
+    startCommand: python bot.py
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.8
       - key: BOT_TOKEN
         sync: false
-      - key: RAZORPAY_KEY_ID
+      - key: PAYU_KEY
         sync: false
-      - key: RAZORPAY_KEY_SECRET
+      - key: PAYU_SALT
         sync: false
-      - key: RAZORPAY_WEBHOOK_SECRET
+      - key: PAYU_VERIFY_URL
+        value: https://info.payu.in/merchant/postservice.php?form=2
+      - key: PUBLIC_BASE_URL
         sync: false
-      - key: SUPPORT_USERNAME
-        sync: false
-      - key: DB_PATH
-        value: /var/data/store.db
-      - key: GOLD_CHANNEL_ID
-        sync: false
-      - key: GOLD_ACCESS_LINK
-        sync: false
-      - key: SILVER_CHANNEL_ID
-        sync: false
-      - key: SILVER_ACCESS_LINK
-        sync: false
-      - key: BRONZE_CHANNEL_ID
-        sync: false
-      - key: BRONZE_ACCESS_LINK
-        sync: false
-      - key: IRON_CHANNEL_ID
-        sync: false
-      - key: IRON_ACCESS_LINK
-        sync: false
+      - key: WEBHOOK_HOST
+        value: 0.0.0.0
+      - key: WEBHOOK_PORT
+        value: 10000

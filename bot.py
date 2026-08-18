@@ -20,6 +20,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -531,7 +532,7 @@ async def create_payu_dynamic_qr(
 
     timeout = aiohttp.ClientTimeout(total=30)
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+       async with aiohttp.ClientSession(timeout=timeout) as session:
 
         async with session.post(
             PAYU_QR_URL,
@@ -543,17 +544,30 @@ async def create_payu_dynamic_qr(
 
             text = await response.text()
 
+            print("========== PAYU RAW RESPONSE ==========")
+            print("HTTP STATUS:", response.status)
+            print(
+                "CONTENT TYPE:",
+                response.headers.get("Content-Type"),
+            )
+            print("RESPONSE:", text[:5000])
+            print("=======================================")
+
             if response.status >= 400:
                 raise RuntimeError(
-                    f"PayU QR HTTP {response.status}: {text}"
+                    f"PayU HTTP {response.status}: "
+                    f"{text[:2000]}"
                 )
 
             try:
                 result = json.loads(text)
-            except Exception:
+            except Exception as e:
                 raise RuntimeError(
-                    f"Invalid PayU response: {text}"
-                )
+                    "PayU returned non-JSON response. "
+                    f"Content-Type="
+                    f"{response.headers.get('Content-Type')}, "
+                    f"Body={text[:2000]}"
+                ) from e
 
     print("PAYU QR RESPONSE:")
     print(json.dumps(result, indent=2))

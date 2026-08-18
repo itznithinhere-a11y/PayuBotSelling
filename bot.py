@@ -36,31 +36,31 @@ load_dotenv()
 # CONFIG
 # ============================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8868565983:AAGlL_8wo-84j7PEWzycenpi-ecg9DouyW4").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-PAYU_KEY = os.getenv("PAYU_KEY", "lSBiEZ").strip()
-PAYU_SALT = os.getenv("PAYU_SALT", "1kGlzjAlrgju2whQVGaQ5yOJulZWtOWE").strip()
+PAYU_KEY = os.getenv("PAYU_KEY", "").strip()
+PAYU_SALT = os.getenv("PAYU_SALT", "").strip()
 PAYU_QR_URL = "https://secure.payu.in/_payment"
 
 PAYU_VERIFY_URL = os.getenv(
     "PAYU_VERIFY_URL",
-    "https://info.payu.in/merchant/postservice.php?form=2",
+    "",
 ).strip()
 
-WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
-WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8080"))
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "")
+WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", ""))
 
 PUBLIC_BASE_URL = os.getenv(
     "PUBLIC_BASE_URL",
-    "https://localhost:8080",
+    "",
 ).rstrip("/")
 
 SUPPORT_USERNAME = os.getenv(
     "SUPPORT_USERNAME",
-    "@Help_desk3_bot",
+    "",
 ).strip()
 
-DB_PATH = os.getenv("DB_PATH", "store.db")
+DB_PATH = os.getenv("DB_PATH", "")
 
 
 # ============================================================

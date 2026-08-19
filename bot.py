@@ -1,18 +1,15 @@
 import asyncio
-import hashlib
-import hmac
 import io
 import json
 import os
 import secrets
 import sqlite3
 import time
-import uuid
 from contextlib import closing
+from datetime import datetime, timedelta
 from typing import Optional
 
 import aiohttp
-import qrcode
 from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -20,11 +17,10 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
-    BufferedInputFile,
-    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    CallbackQuery,
 )
 
 from dotenv import load_dotenv
@@ -41,27 +37,55 @@ load_dotenv()
 # CONFIG
 # ============================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-
-PAYU_KEY = os.getenv("PAYU_KEY", "").strip()
-PAYU_SALT = os.getenv("PAYU_SALT", "").strip()
-
-# Production Dynamic QR endpoint
-PAYU_QR_URL = os.getenv(
-    "PAYU_QR_URL",
-    "https://secure.payu.in/_payment",
+BOT_TOKEN = os.getenv(
+    "BOT_TOKEN",
+    "",
 ).strip()
 
-# PayU verify_payment endpoint
-PAYU_VERIFY_URL = os.getenv(
-    "PAYU_VERIFY_URL",
-    "https://info.payu.in/merchant/postservice.php?form=2",
+
+# ------------------------------------------------------------
+# PAYU PAYMENT LINK API
+# ------------------------------------------------------------
+
+PAYU_CLIENT_ID = os.getenv(
+    "PAYU_CLIENT_ID",
+    "",
 ).strip()
+
+PAYU_CLIENT_SECRET = os.getenv(
+    "PAYU_CLIENT_SECRET",
+    "",
+).strip()
+
+PAYU_MERCHANT_ID = os.getenv(
+    "PAYU_MERCHANT_ID",
+    "",
+).strip()
+
+
+# Production OAuth endpoint
+PAYU_TOKEN_URL = os.getenv(
+    "PAYU_TOKEN_URL",
+    "https://accounts.payu.in/oauth/token",
+).strip()
+
+
+# Production Payment Link endpoint
+PAYU_PAYMENT_LINK_URL = os.getenv(
+    "PAYU_PAYMENT_LINK_URL",
+    "https://oneapi.payu.in/payment-links",
+).strip()
+
+
+# ------------------------------------------------------------
+# WEB SERVER
+# ------------------------------------------------------------
 
 WEBHOOK_HOST = os.getenv(
     "WEBHOOK_HOST",
     "0.0.0.0",
 ).strip()
+
 
 WEBHOOK_PORT = int(
     os.getenv(
@@ -70,31 +94,30 @@ WEBHOOK_PORT = int(
     )
 )
 
+
 PUBLIC_BASE_URL = os.getenv(
     "PUBLIC_BASE_URL",
     "",
 ).rstrip("/")
+
+
+# ------------------------------------------------------------
+# SUPPORT
+# ------------------------------------------------------------
 
 SUPPORT_USERNAME = os.getenv(
     "SUPPORT_USERNAME",
     "",
 ).strip()
 
+
+# ------------------------------------------------------------
+# DATABASE
+# ------------------------------------------------------------
+
 DB_PATH = os.getenv(
     "DB_PATH",
     "orders.db",
-).strip()
-
-# PayU asks for source IP in S2S requests.
-# Better to configure this in .env if your hosting has a fixed public IP.
-PAYU_CLIENT_IP = os.getenv(
-    "PAYU_CLIENT_IP",
-    "",
-).strip()
-
-PAYU_DEVICE_INFO = os.getenv(
-    "PAYU_DEVICE_INFO",
-    "Telegram Bot",
 ).strip()
 
 
@@ -103,56 +126,84 @@ PAYU_DEVICE_INFO = os.getenv(
 # ============================================================
 
 PLANS = {
+
     "gold": {
         "name": "⚡ Gold Dark (Channel 1)",
+
         "price": 1499,
-        "description": "Gold Dark — Lifetime Access",
+
+        "description": (
+            "Gold Dark — Lifetime Access"
+        ),
+
         "channel_id": os.getenv(
             "GOLD_CHANNEL_ID",
             "",
         ).strip(),
+
         "access_link": os.getenv(
             "GOLD_ACCESS_LINK",
             "",
         ).strip(),
     },
 
+
     "silver": {
         "name": "⚡ Silver Dark (Channel 2)",
+
         "price": 1499,
-        "description": "Silver Dark — Lifetime Access",
+
+        "description": (
+            "Silver Dark — Lifetime Access"
+        ),
+
         "channel_id": os.getenv(
             "SILVER_CHANNEL_ID",
             "",
         ).strip(),
+
         "access_link": os.getenv(
             "SILVER_ACCESS_LINK",
             "",
         ).strip(),
     },
 
+
     "bronze": {
         "name": "⚡ Bronze Dark (Channel 3)",
+
         "price": 1499,
-        "description": "Bronze Dark — Lifetime Access",
+
+        "description": (
+            "Bronze Dark — Lifetime Access"
+        ),
+
         "channel_id": os.getenv(
             "BRONZE_CHANNEL_ID",
             "",
         ).strip(),
+
         "access_link": os.getenv(
             "BRONZE_ACCESS_LINK",
             "",
         ).strip(),
     },
 
+
     "iron": {
         "name": "⚡ Iron Dark (Channel 4)",
+
         "price": 1499,
-        "description": "Iron Dark — Lifetime Access",
+
+        "description": (
+            "Iron Dark — Lifetime Access"
+        ),
+
         "channel_id": os.getenv(
             "IRON_CHANNEL_ID",
             "",
         ).strip(),
+
         "access_link": os.getenv(
             "IRON_ACCESS_LINK",
             "",
@@ -166,42 +217,51 @@ PLANS = {
 # ============================================================
 
 router = Router()
+
 bot: Optional[Bot] = None
 
 
 # ============================================================
-# LOGGING
+# ERROR ID
 # ============================================================
 
 def generate_error_id() -> str:
-    """
-    Short unique error ID.
-    Example: E-1787053995-A4F2
-    """
+
     return (
         f"E-{int(time.time())}-"
         f"{secrets.token_hex(2).upper()}"
     )
 
 
-def log_qr_error(
+def log_error(
     error_id: str,
     title: str,
     details=None,
 ):
+
     print()
     print("=" * 70)
-    print(f"PAYU QR ERROR [{error_id}]")
+    print(f"ERROR [{error_id}]")
     print("=" * 70)
-    print("TITLE:")
-    print(title)
+
+    print(
+        "TITLE:",
+        title,
+    )
 
     if details is not None:
-        print()
-        print("DETAILS:")
 
-        if isinstance(details, (dict, list)):
+        print(
+            "DETAILS:"
+        )
+
+        if isinstance(
+            details,
+            (dict, list),
+        ):
+
             try:
+
                 print(
                     json.dumps(
                         details,
@@ -209,10 +269,18 @@ def log_qr_error(
                         ensure_ascii=False,
                     )
                 )
+
             except Exception:
-                print(repr(details))
+
+                print(
+                    repr(details)
+                )
+
         else:
-            print(details)
+
+            print(
+                details
+            )
 
     print("=" * 70)
     print()
@@ -223,6 +291,7 @@ def log_qr_error(
 # ============================================================
 
 def db():
+
     conn = sqlite3.connect(
         DB_PATH,
         timeout=30,
@@ -240,6 +309,7 @@ def init_db():
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS orders (
+
                 reference_id TEXT PRIMARY KEY,
 
                 user_id INTEGER NOT NULL,
@@ -256,6 +326,10 @@ def init_db():
 
                 mihpayid TEXT,
 
+                payment_link_id TEXT,
+
+                payment_link_url TEXT,
+
                 created_at INTEGER NOT NULL,
 
                 paid_at INTEGER,
@@ -268,6 +342,7 @@ def init_db():
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS processed_events (
+
                 event_id TEXT PRIMARY KEY,
 
                 created_at INTEGER NOT NULL
@@ -277,6 +352,10 @@ def init_db():
 
         conn.commit()
 
+
+# ============================================================
+# SAVE ORDER
+# ============================================================
 
 def save_order(
     reference_id: str,
@@ -300,7 +379,9 @@ def save_order(
                 status,
                 created_at
             )
-            VALUES (
+
+            VALUES
+            (
                 ?,
                 ?,
                 ?,
@@ -310,6 +391,7 @@ def save_order(
                 ?
             )
             """,
+
             (
                 reference_id,
                 user_id,
@@ -323,6 +405,10 @@ def save_order(
         conn.commit()
 
 
+# ============================================================
+# GET ORDER
+# ============================================================
+
 def get_order(
     reference_id: str,
 ):
@@ -335,6 +421,7 @@ def get_order(
             FROM orders
             WHERE reference_id = ?
             """,
+
             (
                 reference_id,
             ),
@@ -346,6 +433,10 @@ def get_order(
             else None
         )
 
+
+# ============================================================
+# GET ORDER BY TXNID
+# ============================================================
 
 def get_order_by_txnid(
     txnid: str,
@@ -359,6 +450,7 @@ def get_order_by_txnid(
             FROM orders
             WHERE txnid = ?
             """,
+
             (
                 txnid,
             ),
@@ -370,6 +462,10 @@ def get_order_by_txnid(
             else None
         )
 
+
+# ============================================================
+# LATEST ORDER
+# ============================================================
 
 def get_latest_order(
     user_id: int,
@@ -387,6 +483,7 @@ def get_latest_order(
 
             LIMIT 1
             """,
+
             (
                 user_id,
             ),
@@ -398,6 +495,10 @@ def get_latest_order(
             else None
         )
 
+
+# ============================================================
+# MARK PAID
+# ============================================================
 
 def mark_paid(
     reference_id: str,
@@ -418,6 +519,7 @@ def mark_paid(
 
             WHERE reference_id = ?
             """,
+
             (
                 payment_id,
                 payment_id,
@@ -428,6 +530,10 @@ def mark_paid(
 
         conn.commit()
 
+
+# ============================================================
+# MARK FAILED
+# ============================================================
 
 def mark_failed(
     reference_id: str,
@@ -443,6 +549,7 @@ def mark_failed(
 
             WHERE reference_id = ?
             """,
+
             (
                 reference_id,
             ),
@@ -450,6 +557,10 @@ def mark_failed(
 
         conn.commit()
 
+
+# ============================================================
+# MARK ACCESS SENT
+# ============================================================
 
 def mark_access_sent(
     reference_id: str,
@@ -465,6 +576,7 @@ def mark_access_sent(
 
             WHERE reference_id = ?
             """,
+
             (
                 reference_id,
             ),
@@ -473,11 +585,49 @@ def mark_access_sent(
         conn.commit()
 
 
+# ============================================================
+# SAVE PAYMENT LINK
+# ============================================================
+
+def save_payment_link(
+    reference_id: str,
+    payment_link_id: str,
+    payment_link_url: str,
+):
+
+    with closing(db()) as conn:
+
+        conn.execute(
+            """
+            UPDATE orders
+
+            SET
+                payment_link_id = ?,
+                payment_link_url = ?
+
+            WHERE reference_id = ?
+            """,
+
+            (
+                payment_link_id,
+                payment_link_url,
+                reference_id,
+            ),
+        )
+
+        conn.commit()
+
+
+# ============================================================
+# EVENTS
+# ============================================================
+
 def event_already_processed(
     event_id: str,
 ) -> bool:
 
     if not event_id:
+
         return False
 
     with closing(db()) as conn:
@@ -490,6 +640,7 @@ def event_already_processed(
 
             WHERE event_id = ?
             """,
+
             (
                 event_id,
             ),
@@ -503,6 +654,7 @@ def save_event(
 ):
 
     if not event_id:
+
         return
 
     with closing(db()) as conn:
@@ -517,6 +669,7 @@ def save_event(
 
             VALUES (?, ?)
             """,
+
             (
                 event_id,
                 int(time.time()),
@@ -527,242 +680,152 @@ def save_event(
 
 
 # ============================================================
-# PAYU HASH
+# PAYU OAUTH TOKEN
 # ============================================================
 
-def sha512(
-    value: str,
-) -> str:
+async def get_payu_access_token():
 
-    return hashlib.sha512(
-        value.encode("utf-8")
-    ).hexdigest()
+    error_id = generate_error_id()
 
+    if not PAYU_CLIENT_ID:
 
-def generate_payment_hash(
-    txnid: str,
-    amount: str,
-    productinfo: str,
-    firstname: str,
-    email: str,
-    udf1: str = "",
-    udf2: str = "",
-    udf3: str = "",
-    udf4: str = "",
-    udf5: str = "",
-):
-
-    hash_string = (
-        f"{PAYU_KEY}|"
-        f"{txnid}|"
-        f"{amount}|"
-        f"{productinfo}|"
-        f"{firstname}|"
-        f"{email}|"
-        f"{udf1}|"
-        f"{udf2}|"
-        f"{udf3}|"
-        f"{udf4}|"
-        f"{udf5}"
-        f"||||||"
-        f"{PAYU_SALT}"
-    )
-
-    return sha512(
-        hash_string
-    )
-
-
-def generate_reverse_hash(
-    data: dict,
-):
-
-    status = data.get(
-        "status",
-        "",
-    )
-
-    udf5 = data.get(
-        "udf5",
-        "",
-    )
-
-    udf4 = data.get(
-        "udf4",
-        "",
-    )
-
-    udf3 = data.get(
-        "udf3",
-        "",
-    )
-
-    udf2 = data.get(
-        "udf2",
-        "",
-    )
-
-    udf1 = data.get(
-        "udf1",
-        "",
-    )
-
-    email = data.get(
-        "email",
-        "",
-    )
-
-    firstname = data.get(
-        "firstname",
-        "",
-    )
-
-    productinfo = data.get(
-        "productinfo",
-        "",
-    )
-
-    amount = data.get(
-        "amount",
-        "",
-    )
-
-    txnid = data.get(
-        "txnid",
-        "",
-    )
-
-    key = data.get(
-        "key",
-        "",
-    )
-
-    additional_charges = data.get(
-        "additionalCharges",
-        data.get(
-            "additional_charges",
-            "",
-        ),
-    )
-
-    reverse_string = (
-        f"{PAYU_SALT}|"
-        f"{status}|"
-        f"{additional_charges}|"
-        f"||||||"
-        f"{udf5}|"
-        f"{udf4}|"
-        f"{udf3}|"
-        f"{udf2}|"
-        f"{udf1}|"
-        f"{email}|"
-        f"{firstname}|"
-        f"{productinfo}|"
-        f"{amount}|"
-        f"{txnid}|"
-        f"{key}"
-    )
-
-    return sha512(
-        reverse_string
-    )
-
-
-def verify_payu_response(
-    data: dict,
-) -> bool:
-
-    received_hash = data.get(
-        "hash",
-        "",
-    )
-
-    if not received_hash:
-        return False
-
-    calculated_hash = generate_reverse_hash(
-        data
-    )
-
-    return hmac.compare_digest(
-        calculated_hash.lower(),
-        received_hash.lower(),
-    )
-
-
-# ============================================================
-# PAYU QR RESPONSE ERROR EXTRACTION
-# ============================================================
-
-def extract_payu_error(
-    result,
-):
-
-    if not isinstance(
-        result,
-        dict,
-    ):
-        return "PayU returned invalid response."
-
-    meta = result.get(
-        "metaData",
-        {},
-    )
-
-    if not isinstance(
-        meta,
-        dict,
-    ):
-        meta = {}
-
-    message = (
-        meta.get("message")
-        or result.get("message")
-        or result.get("error")
-        or result.get("errorMessage")
-    )
-
-    status_code = (
-        meta.get("statusCode")
-        or result.get("statusCode")
-        or result.get("code")
-    )
-
-    txn_status = (
-        meta.get("txnStatus")
-        or result.get("status")
-    )
-
-    parts = []
-
-    if message:
-        parts.append(
-            f"Message: {message}"
+        raise RuntimeError(
+            f"{error_id}|PAYU_CLIENT_ID missing."
         )
 
-    if status_code:
-        parts.append(
-            f"Status Code: {status_code}"
+    if not PAYU_CLIENT_SECRET:
+
+        raise RuntimeError(
+            f"{error_id}|PAYU_CLIENT_SECRET missing."
         )
 
-    if txn_status:
-        parts.append(
-            f"Transaction Status: {txn_status}"
+    payload = {
+
+        "client_id":
+            PAYU_CLIENT_ID,
+
+        "client_secret":
+            PAYU_CLIENT_SECRET,
+
+        "grant_type":
+            "client_credentials",
+
+        "scope":
+            "create_payment_links",
+    }
+
+
+    timeout = aiohttp.ClientTimeout(
+        total=30
+    )
+
+
+    try:
+
+        async with aiohttp.ClientSession(
+            timeout=timeout
+        ) as session:
+
+            async with session.post(
+                PAYU_TOKEN_URL,
+
+                data=payload,
+
+                headers={
+                    "Content-Type":
+                        "application/x-www-form-urlencoded",
+
+                    "Accept":
+                        "application/json",
+                },
+            ) as response:
+
+                text = await response.text()
+
+                print(
+                    "PAYU TOKEN HTTP:",
+                    response.status,
+                )
+
+                print(
+                    "PAYU TOKEN RESPONSE:",
+                    text[:5000],
+                )
+
+
+                if response.status >= 400:
+
+                    raise RuntimeError(
+                        f"{error_id}|"
+                        f"PayU token HTTP "
+                        f"{response.status}: "
+                        f"{text[:1000]}"
+                    )
+
+
+                try:
+
+                    result = json.loads(
+                        text
+                    )
+
+                except Exception:
+
+                    raise RuntimeError(
+                        f"{error_id}|"
+                        "PayU token returned invalid JSON."
+                    )
+
+
+                access_token = result.get(
+                    "access_token"
+                )
+
+
+                if not access_token:
+
+                    raise RuntimeError(
+                        f"{error_id}|"
+                        "PayU access token missing."
+                    )
+
+
+                return access_token
+
+
+    except asyncio.TimeoutError as e:
+
+        log_error(
+            error_id,
+            "PayU token timeout",
+            repr(e),
         )
 
-    if not parts:
-        parts.append(
-            "PayU did not return qrString."
+        raise RuntimeError(
+            f"{error_id}|"
+            "PayU token request timed out."
+        ) from e
+
+
+    except aiohttp.ClientError as e:
+
+        log_error(
+            error_id,
+            "PayU token network error",
+            repr(e),
         )
 
-    return " | ".join(parts)
+        raise RuntimeError(
+            f"{error_id}|"
+            "PayU token network error."
+        ) from e
 
 
 # ============================================================
-# CREATE PAYU DYNAMIC QR
+# CREATE PAYU PAYMENT LINK
 # ============================================================
 
-async def create_payu_dynamic_qr(
+async def create_payu_payment_link(
     user_id: int,
     plan_key: str,
     firstname: str,
@@ -770,24 +833,28 @@ async def create_payu_dynamic_qr(
 
     error_id = generate_error_id()
 
-    if plan_key not in PLANS:
 
-        log_qr_error(
-            error_id,
-            "Invalid plan key",
-            plan_key,
-        )
+    if plan_key not in PLANS:
 
         raise RuntimeError(
             f"{error_id}|Invalid plan."
         )
 
+
+    if not PAYU_MERCHANT_ID:
+
+        raise RuntimeError(
+            f"{error_id}|PAYU_MERCHANT_ID missing."
+        )
+
+
     plan = PLANS[
         plan_key
     ]
 
+
     # --------------------------------------------------------
-    # UNIQUE TXN
+    # UNIQUE ORDER IDs
     # --------------------------------------------------------
 
     txnid = (
@@ -797,172 +864,173 @@ async def create_payu_dynamic_qr(
         f"{secrets.token_hex(5)}"
     )
 
+
     reference_id = (
         f"ORD_"
         f"{secrets.token_hex(12)}"
     )
 
-    amount = (
-        f"{plan['price']:.2f}"
+
+    invoice_number = (
+        f"INV"
+        f"{int(time.time())}"
+        f"{secrets.token_hex(4).upper()}"
     )
 
-    email = (
-        f"telegram"
-        f"{user_id}"
-        f"@example.com"
+
+    # --------------------------------------------------------
+    # SAVE ORDER FIRST
+    # --------------------------------------------------------
+
+    save_order(
+        reference_id=reference_id,
+
+        user_id=user_id,
+
+        plan_key=plan_key,
+
+        amount_paise=(
+            plan["price"] * 100
+        ),
+
+        txnid=txnid,
     )
 
-    productinfo = plan[
-        "description"
-    ]
+
+    # --------------------------------------------------------
+    # GET TOKEN
+    # --------------------------------------------------------
+
+    access_token = (
+        await get_payu_access_token()
+    )
+
+
+    # --------------------------------------------------------
+    # PAYMENT LINK EXPIRY
+    # --------------------------------------------------------
+
+    expiry = (
+        datetime.now()
+        + timedelta(minutes=30)
+    )
+
+    expiry_date = expiry.strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
 
     firstname = (
         firstname
         or "Customer"
     )
 
-    udf1 = str(
-        user_id
-    )
-
-    udf2 = plan_key
-
-    udf3 = reference_id
-
-    udf4 = ""
-
-    udf5 = ""
 
     # --------------------------------------------------------
-    # HASH
-    # --------------------------------------------------------
-
-    payment_hash = generate_payment_hash(
-        txnid=txnid,
-        amount=amount,
-        productinfo=productinfo,
-        firstname=firstname,
-        email=email,
-        udf1=udf1,
-        udf2=udf2,
-        udf3=udf3,
-        udf4=udf4,
-        udf5=udf5,
-    )
-
-    # --------------------------------------------------------
-    # SAVE ORDER
-    # --------------------------------------------------------
-
-    save_order(
-        reference_id=reference_id,
-        user_id=user_id,
-        plan_key=plan_key,
-        amount_paise=plan["price"] * 100,
-        txnid=txnid,
-    )
-
-    # --------------------------------------------------------
-    # CLIENT IP
-    # --------------------------------------------------------
-
-    client_ip = (
-        PAYU_CLIENT_IP
-        or "127.0.0.1"
-    )
-
-    # --------------------------------------------------------
-    # PAYU PAYLOAD
+    # PAYMENT LINK PAYLOAD
     # --------------------------------------------------------
 
     payload = {
-        "key": PAYU_KEY,
 
-        "txnid": txnid,
+        "invoiceNumber":
+            invoice_number,
 
-        "amount": amount,
+        "isAmountFilledByCustomer":
+            False,
 
-        "productinfo": productinfo,
+        "subAmount":
+            plan["price"],
 
-        "firstname": firstname,
+        "description":
+            plan["description"],
 
-        "lastname": "",
+        "source":
+            "API",
 
-        "email": email,
+        "isPartialPaymentAllowed":
+            False,
 
-        "phone": "9999999999",
+        "currency":
+            "INR",
 
-        "surl": (
-            f"{PUBLIC_BASE_URL}"
-            "/payu/success"
-        ),
+        "maxPaymentsAllowed":
+            1,
 
-        "furl": (
-            f"{PUBLIC_BASE_URL}"
-            "/payu/failure"
-        ),
+        "expiryDate":
+            expiry_date,
 
-        # Dynamic QR
-        "pg": "DBQR",
+        "isActive":
+            True,
 
-        "bankcode": "UPIDBQR",
+        "customer": {
 
-        "hash": payment_hash,
+            "name":
+                firstname,
 
-        "s2s_client_ip": client_ip,
+            "phone":
+                "9999999999",
 
-        "s2s_device_info": PAYU_DEVICE_INFO,
+            "email":
+                f"telegram{user_id}@example.com",
+        },
 
-        "txn_s2s_flow": "4",
+        "udf": {
 
-        # 30 minutes
-        "expiry_time": "1800",
+            "udf1":
+                str(user_id),
 
-        "udf1": udf1,
+            "udf2":
+                plan_key,
 
-        "udf2": udf2,
+            "udf3":
+                reference_id,
 
-        "udf3": udf3,
+            "udf4":
+                txnid,
 
-        "udf4": udf4,
+            "udf5":
+                "",
+        },
 
-        "udf5": udf5,
+        "notes":
+            f"Telegram User: {user_id}",
+
+        "viaEmail":
+            False,
+
+        "viaSms":
+            False,
     }
 
-    # --------------------------------------------------------
-    # DEBUG REQUEST
-    # --------------------------------------------------------
 
-    safe_payload = dict(
-        payload
-    )
-
-    # Never print secret/hash unnecessarily
-    safe_payload["hash"] = (
-        safe_payload["hash"][:12]
-        + "..."
-    )
+    # --------------------------------------------------------
+    # DEBUG
+    # --------------------------------------------------------
 
     print()
     print("=" * 70)
-    print("PAYU QR REQUEST")
+    print("PAYU PAYMENT LINK REQUEST")
     print("=" * 70)
+
     print(
         json.dumps(
-            safe_payload,
+            payload,
             indent=2,
             ensure_ascii=False,
         )
     )
+
     print("=" * 70)
     print()
+
 
     timeout = aiohttp.ClientTimeout(
         total=30
     )
 
+
     # --------------------------------------------------------
-    # HTTP REQUEST
+    # API REQUEST
     # --------------------------------------------------------
 
     try:
@@ -972,106 +1040,110 @@ async def create_payu_dynamic_qr(
         ) as session:
 
             async with session.post(
-                PAYU_QR_URL,
-                data=payload,
+                PAYU_PAYMENT_LINK_URL,
+
+                json=payload,
+
                 headers={
-                    "Accept": "application/json",
-                    "Content-Type": (
-                        "application/x-www-form-urlencoded"
-                    ),
+
+                    "merchantId":
+                        PAYU_MERCHANT_ID,
+
+                    "Authorization":
+                        f"Bearer {access_token}",
+
+                    "Content-Type":
+                        "application/json",
+
+                    "Accept":
+                        "application/json",
                 },
             ) as response:
 
                 http_status = response.status
 
-                content_type = (
-                    response.headers.get(
-                        "Content-Type",
-                        "",
-                    )
-                )
-
                 raw_text = await response.text()
+
 
     except asyncio.TimeoutError as e:
 
-        log_qr_error(
+        log_error(
             error_id,
-            "PayU request timeout",
+            "PayU payment link timeout",
             repr(e),
         )
 
+        mark_failed(
+            reference_id
+        )
+
         raise RuntimeError(
-            f"{error_id}|PayU request timed out."
+            f"{error_id}|"
+            "PayU payment link request timed out."
         ) from e
+
 
     except aiohttp.ClientError as e:
 
-        log_qr_error(
+        log_error(
             error_id,
-            "PayU network/client error",
+            "PayU payment link network error",
             repr(e),
         )
 
-        raise RuntimeError(
-            f"{error_id}|Network error while connecting to PayU."
-        ) from e
-
-    except Exception as e:
-
-        log_qr_error(
-            error_id,
-            "Unexpected PayU request error",
-            repr(e),
+        mark_failed(
+            reference_id
         )
 
         raise RuntimeError(
-            f"{error_id}|Unexpected PayU request error."
+            f"{error_id}|"
+            "Network error while connecting to PayU."
         ) from e
+
 
     # --------------------------------------------------------
-    # PRINT RAW RESPONSE
+    # RAW RESPONSE
     # --------------------------------------------------------
 
     print()
     print("=" * 70)
-    print("PAYU QR RAW RESPONSE")
+    print("PAYU PAYMENT LINK RESPONSE")
     print("=" * 70)
+
     print(
         "HTTP STATUS:",
         http_status,
     )
-    print(
-        "CONTENT TYPE:",
-        content_type,
-    )
-    print(
-        "RESPONSE:"
-    )
+
     print(
         raw_text[:10000]
     )
+
     print("=" * 70)
     print()
 
-    # --------------------------------------------------------
-    # HTTP ERROR
-    # --------------------------------------------------------
 
     if http_status >= 400:
 
-        log_qr_error(
+        log_error(
             error_id,
             f"PayU HTTP {http_status}",
             raw_text[:5000],
         )
 
-        raise RuntimeError(
-            f"{error_id}|PayU HTTP {http_status}"
+        mark_failed(
+            reference_id
         )
 
+        raise RuntimeError(
+            f"{error_id}|"
+            f"PayU HTTP {http_status}: "
+            f"{raw_text[:1000]}"
+        )
+
+
     # --------------------------------------------------------
-    # JSON PARSE
+    # JSON
     # --------------------------------------------------------
 
     try:
@@ -1080,24 +1152,20 @@ async def create_payu_dynamic_qr(
             raw_text
         )
 
-    except json.JSONDecodeError as e:
+    except Exception as e:
 
-        log_qr_error(
-            error_id,
-            "PayU returned non-JSON response",
-            raw_text[:5000],
+        mark_failed(
+            reference_id
         )
 
         raise RuntimeError(
-            f"{error_id}|PayU returned non-JSON response."
+            f"{error_id}|"
+            "PayU returned invalid JSON."
         ) from e
 
-    # --------------------------------------------------------
-    # FULL RESULT
-    # --------------------------------------------------------
 
     print(
-        "PAYU QR JSON:"
+        "PAYU JSON:"
     )
 
     print(
@@ -1108,201 +1176,95 @@ async def create_payu_dynamic_qr(
         )
     )
 
+
     # --------------------------------------------------------
-    # EXTRACT
+    # RESULT
     # --------------------------------------------------------
 
-    meta = result.get(
-        "metaData",
-        {},
+    result_data = result.get(
+        "result"
     )
 
-    qr_result = result.get(
-        "result",
-        {},
-    )
 
     if not isinstance(
-        meta,
+        result_data,
         dict,
     ):
-        meta = {}
 
-    if not isinstance(
-        qr_result,
-        dict,
-    ):
-        qr_result = {}
+        result_data = {}
 
-    qr_string = qr_result.get(
-        "qrString"
+
+    payment_link = result_data.get(
+        "paymentLink"
     )
 
-    # --------------------------------------------------------
-    # QR STRING MISSING
-    # --------------------------------------------------------
 
-    if not qr_string:
+    if not payment_link:
 
-        reason = extract_payu_error(
-            result
+        message = (
+            result.get("message")
+            or "PayU payment link was not generated."
         )
 
-        log_qr_error(
+
+        log_error(
             error_id,
-            reason,
+            "Payment link missing",
             result,
         )
 
-        # Mark order failed because QR
-        # could not be created.
-        try:
 
-            mark_failed(
-                reference_id
-            )
-
-        except Exception as db_error:
-
-            print(
-                "Failed to mark QR order:",
-                repr(db_error),
-            )
-
-        raise RuntimeError(
-            f"{error_id}|{reason}"
+        mark_failed(
+            reference_id
         )
 
+
+        raise RuntimeError(
+            f"{error_id}|{message}"
+        )
+
+
+    payment_link_id = (
+        result_data.get(
+            "invoiceNumber"
+        )
+        or invoice_number
+    )
+
+
     # --------------------------------------------------------
-    # SUCCESS
+    # SAVE LINK
     # --------------------------------------------------------
+
+    save_payment_link(
+        reference_id=reference_id,
+
+        payment_link_id=payment_link_id,
+
+        payment_link_url=payment_link,
+    )
+
 
     return {
-        "txnid": txnid,
 
-        "reference_id": reference_id,
+        "reference_id":
+            reference_id,
 
-        "qr_string": (
-            str(qr_string)
-            .replace("\n", "")
-            .strip()
-        ),
+        "txnid":
+            txnid,
 
-        "payment_id": qr_result.get(
-            "paymentId"
-        ),
+        "invoice_number":
+            invoice_number,
 
-        "merchant_vpa": qr_result.get(
-            "merchantVpa"
-        ),
+        "payment_link":
+            payment_link,
 
-        "merchant_name": qr_result.get(
-            "merchantName"
-        ),
+        "payment_link_id":
+            payment_link_id,
 
-        "amount": qr_result.get(
-            "amount"
-        ),
-
-        "status": meta.get(
-            "txnStatus"
-        ),
-
-        "error_id": error_id,
+        "amount":
+            plan["price"],
     }
-
-
-# ============================================================
-# VERIFY PAYMENT
-# ============================================================
-
-async def verify_payment_with_payu(
-    txnid: str,
-):
-
-    verify_hash_string = (
-        f"{PAYU_KEY}|"
-        f"verify_payment|"
-        f"{txnid}|"
-        f"{PAYU_SALT}"
-    )
-
-    verify_hash = sha512(
-        verify_hash_string
-    )
-
-    data = {
-        "key": PAYU_KEY,
-
-        "command": "verify_payment",
-
-        "var1": txnid,
-
-        "hash": verify_hash,
-    }
-
-    timeout = aiohttp.ClientTimeout(
-        total=20
-    )
-
-    try:
-
-        async with aiohttp.ClientSession(
-            timeout=timeout
-        ) as session:
-
-            async with session.post(
-                PAYU_VERIFY_URL,
-                data=data,
-                headers={
-                    "Accept": "application/json",
-                },
-            ) as response:
-
-                text = await response.text()
-
-                print()
-                print(
-                    "PAYU VERIFY HTTP:",
-                    response.status,
-                )
-                print(
-                    "PAYU VERIFY RESPONSE:",
-                    text[:10000],
-                )
-                print()
-
-                if response.status >= 400:
-
-                    raise RuntimeError(
-                        f"PayU verification HTTP "
-                        f"{response.status}: "
-                        f"{text[:3000]}"
-                    )
-
-                try:
-
-                    return json.loads(
-                        text
-                    )
-
-                except Exception:
-
-                    return {
-                        "raw": text
-                    }
-
-    except asyncio.TimeoutError as e:
-
-        raise RuntimeError(
-            "PayU verification timeout."
-        ) from e
-
-    except aiohttp.ClientError as e:
-
-        raise RuntimeError(
-            f"PayU verification network error: {e}"
-        ) from e
 
 
 # ============================================================
@@ -1317,14 +1279,21 @@ def support_url():
         .strip()
     )
 
+
     if not username:
+
         return None
+
 
     return (
         "https://t.me/"
         + username
     )
 
+
+# ============================================================
+# MAIN KEYBOARD
+# ============================================================
 
 def main_keyboard():
 
@@ -1366,23 +1335,32 @@ def main_keyboard():
         ],
     ]
 
+
     support = support_url()
+
 
     if support:
 
         buttons.append(
+
             [
                 InlineKeyboardButton(
                     text="📞 Support",
                     url=support,
                 )
             ]
+
         )
+
 
     return InlineKeyboardMarkup(
         inline_keyboard=buttons
     )
 
+
+# ============================================================
+# PLAN KEYBOARD
+# ============================================================
 
 def plan_keyboard(
     plan_key: str,
@@ -1392,7 +1370,9 @@ def plan_keyboard(
         plan_key
     ]
 
+
     return InlineKeyboardMarkup(
+
         inline_keyboard=[
 
             [
@@ -1402,6 +1382,7 @@ def plan_keyboard(
                         f"{plan['price']}"
                         f" with PayU"
                     ),
+
                     callback_data=(
                         f"buy:{plan_key}"
                     ),
@@ -1415,6 +1396,7 @@ def plan_keyboard(
                 )
             ],
         ]
+
     )
 
 
@@ -1432,16 +1414,25 @@ async def send_home(
         else "Contact admin"
     )
 
+
     text = (
+
         "👋 <b>Welcome to DARK STORE!</b>\n"
+
         "━━━━━━━━━━━━━━━━━━\n\n"
 
         "<blockquote>"
+
         "<b>Available Channels:</b>\n"
+
         "⚡ Gold Dark (Channel 1)\n"
+
         "⚡ Silver Dark (Channel 2)\n"
+
         "⚡ Bronze Dark (Channel 3)\n"
+
         "⚡ Iron Dark (Channel 4)"
+
         "</blockquote>\n\n"
 
         "💳 Secure payment powered by PayU\n\n"
@@ -1451,9 +1442,13 @@ async def send_home(
         f"💬 Support: {support}"
     )
 
+
     await bot.send_message(
+
         chat_id,
+
         text,
+
         reply_markup=main_keyboard(),
     )
 
@@ -1505,10 +1500,12 @@ async def plan_callback(
 
     await callback.answer()
 
+
     plan_key = callback.data.split(
         ":",
         1,
     )[1]
+
 
     if plan_key not in PLANS:
 
@@ -1518,25 +1515,33 @@ async def plan_callback(
 
         return
 
+
     plan = PLANS[
         plan_key
     ]
 
+
     text = (
+
         f"<b>{plan['name']}</b>\n"
+
         "━━━━━━━━━━━━━━━━━━\n\n"
 
         f"💰 Price: "
         f"<b>₹{plan['price']}</b>\n\n"
 
         "🔐 Lifetime Access\n"
-        "💳 Pay securely using PayU\n\n"
+
+        "💳 Secure PayU Payment Link\n\n"
 
         "Click below to continue."
     )
 
+
     await callback.message.answer(
+
         text,
+
         reply_markup=plan_keyboard(
             plan_key
         ),
@@ -1544,7 +1549,7 @@ async def plan_callback(
 
 
 # ============================================================
-# BUY / CREATE QR
+# BUY / CREATE PAYMENT LINK
 # ============================================================
 
 @router.callback_query(
@@ -1555,13 +1560,15 @@ async def buy_callback(
 ):
 
     await callback.answer(
-        "Generating dynamic QR..."
+        "Creating PayU payment link..."
     )
+
 
     plan_key = callback.data.split(
         ":",
         1,
     )[1]
+
 
     if plan_key not in PLANS:
 
@@ -1571,10 +1578,12 @@ async def buy_callback(
 
         return
 
+
     try:
 
         result = (
-            await create_payu_dynamic_qr(
+            await create_payu_payment_link(
+
                 user_id=(
                     callback.from_user.id
                 ),
@@ -1588,20 +1597,17 @@ async def buy_callback(
             )
         )
 
+
     except Exception as e:
 
         error_text = str(e)
 
-        print()
+
         print(
-            "FINAL QR ERROR:",
+            "FINAL PAYMENT LINK ERROR:",
             repr(e),
         )
-        print()
 
-        # ----------------------------------------------------
-        # ERROR ID EXTRACTION
-        # ----------------------------------------------------
 
         if "|" in error_text:
 
@@ -1614,26 +1620,28 @@ async def buy_callback(
 
         else:
 
-            error_id = generate_error_id()
-
-            reason = (
-                "Unexpected QR generation error."
+            error_id = (
+                generate_error_id()
             )
 
-            log_qr_error(
+            reason = (
+                "Unexpected payment link error."
+            )
+
+
+            log_error(
                 error_id,
-                "Unhandled QR exception",
+                "Unhandled payment link exception",
                 repr(e),
             )
 
-        # ----------------------------------------------------
-        # USER MESSAGE
-        # ----------------------------------------------------
 
         await callback.message.answer(
-            "❌ <b>Dynamic QR generate nahi ho paya.</b>\n\n"
 
-            "PayU se QR create karte waqt problem aayi.\n\n"
+            "❌ <b>Payment Link generate nahi ho paya.</b>\n\n"
+
+            "PayU se payment link create karte waqt "
+            "problem aayi.\n\n"
 
             f"🔎 Reason: "
             f"<code>{reason}</code>\n\n"
@@ -1647,88 +1655,20 @@ async def buy_callback(
 
         return
 
-    # ========================================================
-    # CREATE QR IMAGE
-    # ========================================================
-
-    try:
-
-        qr = qrcode.QRCode(
-            version=None,
-
-            error_correction=(
-                qrcode.constants.ERROR_CORRECT_M
-            ),
-
-            box_size=10,
-
-            border=4,
-        )
-
-        qr.add_data(
-            result["qr_string"]
-        )
-
-        qr.make(
-            fit=True
-        )
-
-        img = qr.make_image(
-            fill_color="black",
-            back_color="white",
-        )
-
-        buffer = io.BytesIO()
-
-        img.save(
-            buffer,
-            format="PNG",
-        )
-
-        buffer.seek(0)
-
-        qr_bytes = (
-            buffer.getvalue()
-        )
-
-    except Exception as e:
-
-        error_id = generate_error_id()
-
-        log_qr_error(
-            error_id,
-            "QR image generation failed",
-            repr(e),
-        )
-
-        await callback.message.answer(
-            "❌ PayU QR data mil gaya, "
-            "lekin image generate nahi ho payi.\n\n"
-
-            f"🧾 Error ID: "
-            f"<code>{error_id}</code>"
-        )
-
-        return
-
-    # ========================================================
-    # TELEGRAM QR
-    # ========================================================
-
-    qr_file = BufferedInputFile(
-        qr_bytes,
-
-        filename=(
-            f"{result['txnid']}.png"
-        ),
-    )
 
     plan = PLANS[
         plan_key
     ]
 
+
+    # --------------------------------------------------------
+    # PAYMENT LINK UI
+    # --------------------------------------------------------
+
     text = (
-        "💳 <b>PAYU UPI PAYMENT</b>\n"
+
+        "💳 <b>PAYU PAYMENT</b>\n"
+
         "━━━━━━━━━━━━━━━━━━\n\n"
 
         f"📦 Plan: "
@@ -1737,27 +1677,46 @@ async def buy_callback(
         f"💰 Amount: "
         f"<b>₹{plan['price']}</b>\n\n"
 
-        "📱 <b>Scan this QR using any UPI app</b>\n"
+        "🔐 <b>Secure PayU Checkout</b>\n\n"
 
-        "GPay • PhonePe • Paytm • BHIM • Any UPI App\n\n"
+        "Neeche <b>Pay Now</b> button dabakar "
+        "PayU checkout page open karein.\n\n"
 
-        "⚡ This is a <b>dynamic QR</b>.\n"
-        "Amount is already fixed in the QR.\n\n"
-
-        f"🧾 Txn ID:\n"
+        f"🧾 Order ID:\n"
         f"<code>{result['txnid']}</code>\n\n"
 
-        "⏱️ QR validity: <b>30 minutes</b>\n\n"
+        "⏱️ Payment link validity: "
+        "<b>30 minutes</b>\n\n"
 
-        "After payment, press "
-        "<b>Verify Payment</b>."
+        "Payment complete hone ke baad "
+        "<b>Verify Payment</b> dabayein."
     )
 
+
     keyboard = InlineKeyboardMarkup(
+
         inline_keyboard=[
 
             [
                 InlineKeyboardButton(
+
+                    text=(
+                        f"💳 Pay ₹"
+                        f"{plan['price']}"
+                        f" Now"
+                    ),
+
+                    url=(
+                        result[
+                            "payment_link"
+                        ]
+                    ),
+                )
+            ],
+
+            [
+                InlineKeyboardButton(
+
                     text="🔄 Verify Payment",
 
                     callback_data=(
@@ -1772,7 +1731,6 @@ async def buy_callback(
             [
                 InlineKeyboardButton(
                     text="📋 My Plan",
-
                     callback_data="myplan",
                 )
             ],
@@ -1780,18 +1738,15 @@ async def buy_callback(
             [
                 InlineKeyboardButton(
                     text="↩️ Back",
-
                     callback_data="home",
                 )
             ],
         ]
     )
 
-    await callback.message.answer_photo(
-        photo=qr_file,
 
-        caption=text,
-
+    await callback.message.answer(
+        text,
         reply_markup=keyboard,
     )
 
@@ -1808,8 +1763,9 @@ async def make_access_link(
         plan_key
     ]
 
+
     # --------------------------------------------------------
-    # ONE-TIME TELEGRAM INVITE
+    # ONE TIME TELEGRAM INVITE
     # --------------------------------------------------------
 
     if plan["channel_id"]:
@@ -1818,15 +1774,18 @@ async def make_access_link(
 
             invite = (
                 await bot.create_chat_invite_link(
-                    chat_id=plan[
-                        "channel_id"
-                    ],
+
+                    chat_id=(
+                        plan["channel_id"]
+                    ),
 
                     member_limit=1,
                 )
             )
 
+
             return invite.invite_link
+
 
         except Exception as e:
 
@@ -1835,8 +1794,9 @@ async def make_access_link(
                 repr(e),
             )
 
+
     # --------------------------------------------------------
-    # FALLBACK STATIC LINK
+    # STATIC FALLBACK
     # --------------------------------------------------------
 
     if plan["access_link"]:
@@ -1844,6 +1804,7 @@ async def make_access_link(
         return plan[
             "access_link"
         ]
+
 
     return None
 
@@ -1862,11 +1823,13 @@ async def deliver_access(
 
         return True
 
+
     access_link = (
         await make_access_link(
             order["plan_key"]
         )
     )
+
 
     if not access_link:
 
@@ -1875,7 +1838,9 @@ async def deliver_access(
             or "admin"
         )
 
+
         await bot.send_message(
+
             order["user_id"],
 
             "✅ <b>Payment confirmed!</b>\n\n"
@@ -1885,16 +1850,21 @@ async def deliver_access(
             f"📞 Support: {support}",
         )
 
+
         return False
+
 
     plan = PLANS[
         order["plan_key"]
     ]
 
+
     await bot.send_message(
+
         order["user_id"],
 
         "🎉 <b>Payment Confirmed!</b>\n"
+
         "━━━━━━━━━━━━━━━━━━\n\n"
 
         f"📦 Plan: "
@@ -1907,128 +1877,286 @@ async def deliver_access(
         f"<code>{order['txnid']}</code>\n\n"
 
         "🔗 <b>Your Access Link:</b>\n"
+
         f"{access_link}\n\n"
 
         "⚠️ Link ko kisi ke saath share mat karein."
     )
 
+
     mark_access_sent(
         order["reference_id"]
     )
+
 
     return True
 
 
 # ============================================================
-# PROCESS SUCCESSFUL PAYMENT
+# VERIFY PAYMENT LINK
 # ============================================================
 
-async def process_successful_payment(
-    data: dict,
+async def get_payment_link_status(
+    invoice_number: str,
 ):
 
-    txnid = data.get(
-        "txnid"
+    error_id = generate_error_id()
+
+
+    # --------------------------------------------------------
+    # GET TOKEN WITH READ SCOPE
+    # --------------------------------------------------------
+
+    payload = {
+
+        "client_id":
+            PAYU_CLIENT_ID,
+
+        "client_secret":
+            PAYU_CLIENT_SECRET,
+
+        "grant_type":
+            "client_credentials",
+
+        "scope":
+            "read_payment_links",
+    }
+
+
+    timeout = aiohttp.ClientTimeout(
+        total=30
     )
 
-    if not txnid:
 
-        return False
+    try:
 
-    order = get_order_by_txnid(
-        txnid
-    )
+        async with aiohttp.ClientSession(
+            timeout=timeout
+        ) as session:
 
-    if not order:
+            async with session.post(
 
-        print(
-            "Unknown transaction:",
-            txnid,
-        )
+                PAYU_TOKEN_URL,
 
-        return False
+                data=payload,
+
+                headers={
+                    "Content-Type":
+                        "application/x-www-form-urlencoded",
+
+                    "Accept":
+                        "application/json",
+                },
+
+            ) as response:
+
+                token_text = (
+                    await response.text()
+                )
+
+
+                if response.status >= 400:
+
+                    raise RuntimeError(
+                        f"{error_id}|"
+                        f"PayU token HTTP "
+                        f"{response.status}: "
+                        f"{token_text[:1000]}"
+                    )
+
+
+                token_data = json.loads(
+                    token_text
+                )
+
+
+                access_token = (
+                    token_data.get(
+                        "access_token"
+                    )
+                )
+
+
+                if not access_token:
+
+                    raise RuntimeError(
+                        f"{error_id}|"
+                        "PayU read token missing."
+                    )
+
+
+            # ------------------------------------------------
+            # GET PAYMENT LINK
+            # ------------------------------------------------
+
+            url = (
+                PAYU_PAYMENT_LINK_URL.rstrip("/")
+                + "/"
+                + invoice_number
+            )
+
+
+            async with session.get(
+
+                url,
+
+                headers={
+
+                    "merchantId":
+                        PAYU_MERCHANT_ID,
+
+                    "Authorization":
+                        f"Bearer {access_token}",
+
+                    "Accept":
+                        "application/json",
+                },
+
+            ) as response:
+
+                text = (
+                    await response.text()
+                )
+
+
+                print(
+                    "PAYU LINK STATUS HTTP:",
+                    response.status,
+                )
+
+
+                print(
+                    "PAYU LINK STATUS:",
+                    text[:10000],
+                )
+
+
+                if response.status >= 400:
+
+                    raise RuntimeError(
+                        f"{error_id}|"
+                        f"PayU status HTTP "
+                        f"{response.status}: "
+                        f"{text[:1000]}"
+                    )
+
+
+                return json.loads(
+                    text
+                )
+
+
+    except asyncio.TimeoutError as e:
+
+        raise RuntimeError(
+            f"{error_id}|"
+            "PayU status request timed out."
+        ) from e
+
+
+    except aiohttp.ClientError as e:
+
+        raise RuntimeError(
+            f"{error_id}|"
+            f"PayU status network error: {e}"
+        ) from e
+
+
+# ============================================================
+# PROCESS PAYMENT
+# ============================================================
+
+async def process_payment_link_success(
+    order: dict,
+    payment_details: dict,
+):
 
     # --------------------------------------------------------
     # AMOUNT VALIDATION
     # --------------------------------------------------------
 
-    try:
-
-        received_amount = float(
-            data.get(
-                "amount",
-                "0",
-            )
+    received_amount = (
+        payment_details.get(
+            "totalAmount"
         )
-
-        expected_amount = (
-            order[
-                "amount_paise"
-            ]
-            / 100
+        or payment_details.get(
+            "subAmount"
         )
+    )
 
-        if abs(
-            received_amount
-            - expected_amount
-        ) > 0.01:
 
-            print(
-                "Amount mismatch:",
-                txnid,
-                received_amount,
-                expected_amount,
+    if received_amount is not None:
+
+        try:
+
+            expected_amount = (
+                order["amount_paise"]
+                / 100
             )
+
+
+            received_amount = float(
+                received_amount
+            )
+
+
+            if abs(
+                received_amount
+                - expected_amount
+            ) > 0.01:
+
+                print(
+                    "PAYMENT LINK AMOUNT MISMATCH:",
+                    received_amount,
+                    expected_amount,
+                )
+
+                return False
+
+
+        except Exception:
 
             return False
 
-    except Exception:
-
-        return False
 
     # --------------------------------------------------------
-    # PLAN VALIDATION
-    # --------------------------------------------------------
-
-    if data.get("udf2"):
-
-        if (
-            data["udf2"]
-            != order["plan_key"]
-        ):
-
-            print(
-                "Plan mismatch:",
-                txnid,
-            )
-
-            return False
-
-    # --------------------------------------------------------
-    # PAYMENT ID
+    # MARK PAID
     # --------------------------------------------------------
 
     payment_id = (
-        data.get("mihpayid")
-        or data.get("payuMoneyId")
-        or txnid
+
+        payment_details.get(
+            "mihpayid"
+        )
+
+        or payment_details.get(
+            "paymentId"
+        )
+
+        or payment_details.get(
+            "transactionId"
+        )
+
+        or order["txnid"]
     )
+
 
     if order["status"] != "paid":
 
         mark_paid(
+
             order["reference_id"],
-            payment_id,
+
+            str(payment_id),
         )
+
 
     updated = get_order(
         order["reference_id"]
     )
 
-    if (
-        updated
-        and not updated["access_sent"]
-    ):
+
+    if updated:
 
         try:
 
@@ -2043,177 +2171,259 @@ async def process_successful_payment(
                 repr(e),
             )
 
+
     return True
 
 
 # ============================================================
-# PAYU SUCCESS
+# VERIFY BUTTON
 # ============================================================
 
-async def payu_success(
-    request: web.Request,
+@router.callback_query(
+    F.data.startswith("verify:")
+)
+async def verify_callback(
+    callback: CallbackQuery,
 ):
+
+    await callback.answer(
+        "Checking PayU payment..."
+    )
+
+
+    reference_id = (
+        callback.data.split(
+            ":",
+            1,
+        )[1]
+    )
+
+
+    order = get_order(
+        reference_id
+    )
+
+
+    if not order:
+
+        await callback.message.answer(
+            "❌ Order not found."
+        )
+
+        return
+
+
+    if (
+        order["user_id"]
+        != callback.from_user.id
+    ):
+
+        await callback.message.answer(
+            "❌ Invalid order."
+        )
+
+        return
+
+
+    if order["status"] == "paid":
+
+        await callback.message.answer(
+            "✅ Payment already confirmed.\n\n"
+            "Use /myplan for access."
+        )
+
+        return
+
+
+    if not order.get(
+        "payment_link_id"
+    ):
+
+        await callback.message.answer(
+            "❌ Payment link information missing."
+        )
+
+        return
+
 
     try:
 
-        post_data = await request.post()
+        result = (
+            await get_payment_link_status(
 
-        data = dict(
-            post_data
+                order[
+                    "payment_link_id"
+                ]
+            )
         )
 
-    except Exception as e:
 
         print(
-            "PayU success parse error:",
-            repr(e),
+            "PAYU PAYMENT LINK VERIFY:",
+            json.dumps(
+                result,
+                indent=2,
+                ensure_ascii=False,
+            ),
         )
 
-        return web.Response(
-            status=400,
-            text="Invalid request",
+
+        result_data = result.get(
+            "result"
         )
 
-    print(
-        "PAYU SUCCESS:",
-        data,
-    )
 
-    # --------------------------------------------------------
-    # HASH
-    # --------------------------------------------------------
-
-    if not verify_payu_response(
-        data
-    ):
-
-        print(
-            "PayU reverse hash verification failed"
-        )
-
-        return web.Response(
-            status=400,
-            text="Invalid hash",
-        )
-
-    # --------------------------------------------------------
-    # STATUS
-    # --------------------------------------------------------
-
-    if data.get(
-        "status"
-    ) != "success":
-
-        return web.Response(
-            status=400,
-            text="Payment not successful",
-        )
-
-    txnid = data.get(
-        "txnid",
-        "",
-    )
-
-    event_id = (
-        "success_"
-        + txnid
-        + "_"
-        + data.get(
-            "mihpayid",
-            "",
-        )
-    )
-
-    if event_already_processed(
-        event_id
-    ):
-
-        return web.Response(
-            status=200,
-            text="already processed",
-        )
-
-    save_event(
-        event_id
-    )
-
-    success = (
-        await process_successful_payment(
-            data
-        )
-    )
-
-    if not success:
-
-        return web.Response(
-            status=400,
-            text="Payment verification failed",
-        )
-
-    return web.Response(
-        status=200,
-        text=(
-            "Payment successful. "
-            "You can return to Telegram."
-        ),
-    )
-
-
-# ============================================================
-# PAYU FAILURE
-# ============================================================
-
-async def payu_failure(
-    request: web.Request,
-):
-
-    try:
-
-        post_data = await request.post()
-
-        data = dict(
-            post_data
-        )
-
-    except Exception:
-
-        return web.Response(
-            status=400,
-            text="Invalid request",
-        )
-
-    print(
-        "PAYU FAILURE:",
-        data,
-    )
-
-    if data.get("hash"):
-
-        if not verify_payu_response(
-            data
+        if not isinstance(
+            result_data,
+            dict,
         ):
 
-            return web.Response(
-                status=400,
-                text="Invalid hash",
+            result_data = {}
+
+
+        # ----------------------------------------------------
+        # PAYMENT LINK STATUS
+        # ----------------------------------------------------
+
+        status = (
+
+            result_data.get(
+                "status"
             )
 
-    txnid = data.get(
-        "txnid",
-        "",
-    )
+            or result_data.get(
+                "paymentStatus"
+            )
 
-    if txnid:
-
-        order = get_order_by_txnid(
-            txnid
+            or result.get(
+                "status"
+            )
         )
 
-        if (
-            order
-            and order["status"]
-            != "paid"
-        ):
+
+        status_text = str(
+            status
+            or ""
+        ).lower()
+
+
+        # ----------------------------------------------------
+        # AMOUNT
+        # ----------------------------------------------------
+
+        total_collected = (
+            result_data.get(
+                "totalAmountCollected"
+            )
+        )
+
+
+        if total_collected is not None:
+
+            try:
+
+                expected = (
+                    order["amount_paise"]
+                    / 100
+                )
+
+                collected = float(
+                    total_collected
+                )
+
+
+                if (
+                    collected > 0
+                    and abs(
+                        collected
+                        - expected
+                    ) > 0.01
+                ):
+
+                    await callback.message.answer(
+
+                        "❌ <b>Amount mismatch detected.</b>\n\n"
+
+                        f"Expected: ₹{expected:.2f}\n"
+
+                        f"Received: ₹{collected:.2f}\n\n"
+
+                        "Payment manually verify karwana padega."
+                    )
+
+                    return
+
+
+            except Exception:
+
+                pass
+
+
+        # ----------------------------------------------------
+        # SUCCESS
+        # ----------------------------------------------------
+
+        success_statuses = {
+
+            "paid",
+            "success",
+            "successful",
+            "completed",
+            "complete",
+        }
+
+
+        if status_text in success_statuses:
+
+            success = (
+                await process_payment_link_success(
+
+                    order,
+
+                    result_data,
+                )
+            )
+
+
+            if success:
+
+                await callback.message.answer(
+
+                    "🎉 <b>Payment Confirmed!</b>\n\n"
+
+                    "Aapka payment successfully verify ho gaya hai.\n\n"
+
+                    "🔗 Access link Telegram par "
+                    "send kar diya gaya hai.\n\n"
+
+                    "Use <b>/myplan</b> anytime."
+                )
+
+            else:
+
+                await callback.message.answer(
+
+                    "❌ Payment verification mein "
+                    "amount validation failed."
+                )
+
+
+            return
+
+
+        # ----------------------------------------------------
+        # FAILED
+        # ----------------------------------------------------
+
+        if status_text in {
+
+            "failed",
+            "failure",
+            "cancelled",
+            "canceled",
+            "expired",
+            "inactive",
+        }:
 
             mark_failed(
                 order[
@@ -2221,10 +2431,57 @@ async def payu_failure(
                 ]
             )
 
-    return web.Response(
-        status=200,
-        text="Payment failed",
-    )
+
+            await callback.message.answer(
+
+                "❌ <b>Payment failed/expired.</b>\n\n"
+
+                "Naya payment link generate karne ke "
+                "liye plan dobara select karein."
+            )
+
+
+            return
+
+
+        # ----------------------------------------------------
+        # PENDING
+        # ----------------------------------------------------
+
+        await callback.message.answer(
+
+            "⏳ <b>Payment abhi confirm nahi hua.</b>\n\n"
+
+            f"PayU Status: "
+            f"<code>{status or 'pending'}</code>\n\n"
+
+            "Agar payment abhi-abhi kiya hai "
+            "to 10–30 seconds wait karke "
+            "dobara Verify Payment dabayein."
+        )
+
+
+    except Exception as e:
+
+        error_id = generate_error_id()
+
+
+        log_error(
+            error_id,
+            "Payment verification failed",
+            repr(e),
+        )
+
+
+        await callback.message.answer(
+
+            "❌ <b>PayU verification failed.</b>\n\n"
+
+            f"🧾 Error ID: "
+            f"<code>{error_id}</code>\n\n"
+
+            "Thodi der baad dobara try karein."
+        )
 
 
 # ============================================================
@@ -2265,9 +2522,11 @@ async def send_my_plan(
         message.from_user.id
     )
 
+
     if not order:
 
         await message.answer(
+
             "📋 <b>My Plan</b>\n\n"
 
             "Aapka koi order nahi mila.",
@@ -2277,19 +2536,28 @@ async def send_my_plan(
 
         return
 
+
     plan = PLANS.get(
         order["plan_key"],
         {},
     )
 
+
     status = order[
         "status"
     ].upper()
 
+
+    # --------------------------------------------------------
+    # PAID
+    # --------------------------------------------------------
+
     if order["status"] == "paid":
 
         text = (
+
             "📋 <b>My Plan</b>\n"
+
             "━━━━━━━━━━━━━━━━━━\n\n"
 
             f"📦 Plan: "
@@ -2314,11 +2582,14 @@ async def send_my_plan(
             "button dabayein."
         )
 
+
         keyboard = InlineKeyboardMarkup(
+
             inline_keyboard=[
 
                 [
                     InlineKeyboardButton(
+
                         text="🔗 Send Access Link",
 
                         callback_data=(
@@ -2333,71 +2604,113 @@ async def send_my_plan(
                 [
                     InlineKeyboardButton(
                         text="↩️ Back",
-
                         callback_data="home",
                     )
                 ],
             ]
         )
 
+
         await message.answer(
+
             text,
+
             reply_markup=keyboard,
         )
 
-    else:
 
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
+        return
 
-                [
-                    InlineKeyboardButton(
-                        text="🔄 Verify Payment",
 
-                        callback_data=(
-                            "verify:"
-                            + order[
-                                "reference_id"
-                            ]
-                        ),
-                    )
-                ],
+    # --------------------------------------------------------
+    # UNPAID
+    # --------------------------------------------------------
 
-                [
-                    InlineKeyboardButton(
-                        text="↩️ Back",
+    keyboard_buttons = []
 
-                        callback_data="home",
-                    )
-                ],
+
+    if order.get(
+        "payment_link_url"
+    ):
+
+        keyboard_buttons.append(
+
+            [
+                InlineKeyboardButton(
+
+                    text="💳 Open Payment Link",
+
+                    url=(
+                        order[
+                            "payment_link_url"
+                        ]
+                    ),
+                )
             ]
         )
 
-        await message.answer(
-            "📋 <b>My Plan</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
 
-            f"📦 Plan: "
-            f"<b>"
-            f"{plan.get(
-                'name',
-                order['plan_key']
-            )}"
-            f"</b>\n"
+    keyboard_buttons.append(
 
-            f"💰 Amount: "
-            f"<b>"
-            f"₹{order['amount_paise'] // 100}"
-            f"</b>\n"
+        [
+            InlineKeyboardButton(
 
-            f"📌 Status: "
-            f"<b>{status}</b>\n\n"
+                text="🔄 Verify Payment",
 
-            "Agar payment kar diya hai to "
-            "<b>Verify Payment</b> dabayein.",
+                callback_data=(
+                    "verify:"
+                    + order[
+                        "reference_id"
+                    ]
+                ),
+            )
+        ]
+    )
 
-            reply_markup=keyboard,
-        )
+
+    keyboard_buttons.append(
+
+        [
+            InlineKeyboardButton(
+                text="↩️ Back",
+                callback_data="home",
+            )
+        ]
+    )
+
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=keyboard_buttons
+    )
+
+
+    await message.answer(
+
+        "📋 <b>My Plan</b>\n"
+
+        "━━━━━━━━━━━━━━━━━━\n\n"
+
+        f"📦 Plan: "
+        f"<b>"
+        f"{plan.get(
+            'name',
+            order['plan_key']
+        )}"
+        f"</b>\n"
+
+        f"💰 Amount: "
+        f"<b>"
+        f"₹{order['amount_paise'] // 100}"
+        f"</b>\n"
+
+        f"📌 Status: "
+        f"<b>{status}</b>\n\n"
+
+        "Agar payment kar diya hai to "
+        "<b>Verify Payment</b> dabayein.",
+
+        reply_markup=keyboard,
+    )
 
 
 # ============================================================
@@ -2415,6 +2728,7 @@ async def access_callback(
         "Checking..."
     )
 
+
     reference_id = (
         callback.data.split(
             ":",
@@ -2422,9 +2736,11 @@ async def access_callback(
         )[1]
     )
 
+
     order = get_order(
         reference_id
     )
+
 
     if not order:
 
@@ -2433,6 +2749,7 @@ async def access_callback(
         )
 
         return
+
 
     if (
         order["user_id"]
@@ -2445,6 +2762,7 @@ async def access_callback(
 
         return
 
+
     if order["status"] != "paid":
 
         await callback.message.answer(
@@ -2452,6 +2770,7 @@ async def access_callback(
         )
 
         return
+
 
     try:
 
@@ -2461,19 +2780,26 @@ async def access_callback(
             )
         )
 
+
         if not access_link:
 
             await callback.message.answer(
+
                 "❌ Access link unavailable.\n"
+
                 f"Contact {SUPPORT_USERNAME}."
             )
 
             return
 
+
         await callback.message.answer(
+
             "🔗 <b>Your Access Link</b>\n\n"
+
             f"{access_link}"
         )
+
 
     except Exception as e:
 
@@ -2482,244 +2808,12 @@ async def access_callback(
             repr(e),
         )
 
+
         await callback.message.answer(
+
             "❌ Access send nahi ho paya.\n"
+
             f"Contact {SUPPORT_USERNAME}."
-        )
-
-
-# ============================================================
-# VERIFY BUTTON
-# ============================================================
-
-@router.callback_query(
-    F.data.startswith("verify:")
-)
-async def verify_callback(
-    callback: CallbackQuery,
-):
-
-    await callback.answer(
-        "Verifying with PayU..."
-    )
-
-    reference_id = (
-        callback.data.split(
-            ":",
-            1,
-        )[1]
-    )
-
-    order = get_order(
-        reference_id
-    )
-
-    if not order:
-
-        await callback.message.answer(
-            "❌ Order not found."
-        )
-
-        return
-
-    if (
-        order["user_id"]
-        != callback.from_user.id
-    ):
-
-        await callback.message.answer(
-            "❌ Invalid order."
-        )
-
-        return
-
-    if order["status"] == "paid":
-
-        await callback.message.answer(
-            "✅ Payment already confirmed.\n"
-            "Use /myplan for access."
-        )
-
-        return
-
-    try:
-
-        result = (
-            await verify_payment_with_payu(
-                order["txnid"]
-            )
-        )
-
-        print(
-            "PAYU VERIFY:",
-            result,
-        )
-
-        transaction_details = (
-            result.get(
-                "transaction_details",
-                {},
-            )
-        )
-
-        details = transaction_details.get(
-            order["txnid"],
-            {},
-        )
-
-        payment_status = (
-            details.get("status")
-            or result.get("status")
-        )
-
-        # ----------------------------------------------------
-        # SUCCESS
-        # ----------------------------------------------------
-
-        if (
-            str(
-                payment_status
-            ).lower()
-            == "success"
-        ):
-
-            # Amount validation from verify API
-            verify_amount = (
-                details.get("amt")
-                or details.get("amount")
-            )
-
-            if verify_amount is not None:
-
-                try:
-
-                    expected = (
-                        order[
-                            "amount_paise"
-                        ]
-                        / 100
-                    )
-
-                    received = float(
-                        verify_amount
-                    )
-
-                    if abs(
-                        received
-                        - expected
-                    ) > 0.01:
-
-                        await callback.message.answer(
-                            "❌ Amount mismatch detected.\n"
-                            "Payment manually verify karwana padega."
-                        )
-
-                        print(
-                            "VERIFY AMOUNT MISMATCH:",
-                            order["txnid"],
-                            received,
-                            expected,
-                        )
-
-                        return
-
-                except Exception:
-
-                    pass
-
-            payment_id = (
-                details.get(
-                    "mihpayid"
-                )
-                or details.get(
-                    "payuMoneyId"
-                )
-                or order["txnid"]
-            )
-
-            mark_paid(
-                order["reference_id"],
-                payment_id,
-            )
-
-            updated = get_order(
-                order["reference_id"]
-            )
-
-            try:
-
-                await deliver_access(
-                    updated
-                )
-
-            except Exception as e:
-
-                print(
-                    "Access delivery failed:",
-                    repr(e),
-                )
-
-                await callback.message.answer(
-                    "✅ Payment confirmed.\n"
-                    "❌ Access delivery mein problem aayi.\n\n"
-                    f"Contact {SUPPORT_USERNAME}."
-                )
-
-        # ----------------------------------------------------
-        # FAILED
-        # ----------------------------------------------------
-
-        elif str(
-            payment_status
-        ).lower() in (
-            "failure",
-            "failed",
-        ):
-
-            mark_failed(
-                order["reference_id"]
-            )
-
-            await callback.message.answer(
-                "❌ Payment failed."
-            )
-
-        # ----------------------------------------------------
-        # PENDING
-        # ----------------------------------------------------
-
-        else:
-
-            await callback.message.answer(
-                "⏳ <b>Payment not confirmed yet.</b>\n\n"
-
-                f"PayU status: "
-                f"<code>"
-                f"{payment_status}"
-                f"</code>\n\n"
-
-                "Agar payment abhi-abhi kiya hai "
-                "to 10–30 seconds baad dobara "
-                "verify karein."
-            )
-
-    except Exception as e:
-
-        error_id = generate_error_id()
-
-        log_qr_error(
-            error_id,
-            "PayU payment verification failed",
-            repr(e),
-        )
-
-        await callback.message.answer(
-            "❌ PayU verification failed.\n\n"
-
-            f"🧾 Error ID: "
-            f"<code>{error_id}</code>\n\n"
-
-            "Thodi der baad try karein."
         )
 
 
@@ -2732,16 +2826,16 @@ async def health(
 ):
 
     return web.json_response(
+
         {
+
             "ok": True,
 
-            "service": (
-                "telegram-store-bot-payu"
-            ),
+            "service":
+                "telegram-store-bot-payu-payment-link",
 
-            "time": int(
-                time.time()
-            ),
+            "time":
+                int(time.time()),
         }
     )
 
@@ -2754,38 +2848,37 @@ async def start_web_server():
 
     app = web.Application()
 
+
     app.router.add_get(
         "/health",
         health,
     )
 
-    app.router.add_post(
-        "/payu/success",
-        payu_success,
-    )
-
-    app.router.add_post(
-        "/payu/failure",
-        payu_failure,
-    )
 
     runner = web.AppRunner(
         app
     )
 
+
     await runner.setup()
 
+
     site = web.TCPSite(
+
         runner,
+
         WEBHOOK_HOST,
+
         WEBHOOK_PORT,
     )
 
+
     await site.start()
+
 
     print()
     print(
-        "PayU callback server running:"
+        "Web server running:"
     )
 
     print(
@@ -2798,17 +2891,8 @@ async def start_web_server():
         f"{PUBLIC_BASE_URL}/health",
     )
 
-    print(
-        "Success:",
-        f"{PUBLIC_BASE_URL}/payu/success",
-    )
-
-    print(
-        "Failure:",
-        f"{PUBLIC_BASE_URL}/payu/failure",
-    )
-
     print()
+
 
     return runner
 
@@ -2821,29 +2905,41 @@ def validate_config():
 
     errors = []
 
+
     if not BOT_TOKEN:
 
         errors.append(
             "BOT_TOKEN missing"
         )
 
-    if not PAYU_KEY:
+
+    if not PAYU_CLIENT_ID:
 
         errors.append(
-            "PAYU_KEY missing"
+            "PAYU_CLIENT_ID missing"
         )
 
-    if not PAYU_SALT:
+
+    if not PAYU_CLIENT_SECRET:
 
         errors.append(
-            "PAYU_SALT missing"
+            "PAYU_CLIENT_SECRET missing"
         )
+
+
+    if not PAYU_MERCHANT_ID:
+
+        errors.append(
+            "PAYU_MERCHANT_ID missing"
+        )
+
 
     if not PUBLIC_BASE_URL:
 
         errors.append(
             "PUBLIC_BASE_URL missing"
         )
+
 
     if (
         "localhost"
@@ -2854,6 +2950,7 @@ def validate_config():
             "PUBLIC_BASE_URL cannot be localhost"
         )
 
+
     if (
         "your-domain.com"
         in PUBLIC_BASE_URL.lower()
@@ -2863,18 +2960,17 @@ def validate_config():
             "Replace example PUBLIC_BASE_URL"
         )
 
-    if not PAYU_VERIFY_URL:
-
-        errors.append(
-            "PAYU_VERIFY_URL missing"
-        )
 
     if errors:
 
         raise RuntimeError(
+
             "Configuration errors:\n"
+
             + "\n".join(
+
                 f"- {x}"
+
                 for x in errors
             )
         )
@@ -2888,11 +2984,15 @@ async def main():
 
     global bot
 
+
     validate_config()
+
 
     init_db()
 
+
     bot = Bot(
+
         token=BOT_TOKEN,
 
         default=(
@@ -2902,15 +3002,19 @@ async def main():
         ),
     )
 
+
     dp = Dispatcher()
+
 
     dp.include_router(
         router
     )
 
+
     runner = (
         await start_web_server()
     )
+
 
     try:
 
@@ -2923,7 +3027,7 @@ async def main():
         )
 
         print(
-            "Payment gateway: PayU"
+            "Payment gateway: PayU Payment Links"
         )
 
         print(
@@ -2931,13 +3035,18 @@ async def main():
         )
 
         print(
-            "PayU QR URL:",
-            PAYU_QR_URL,
+            "PayU Token URL:",
+            PAYU_TOKEN_URL,
         )
 
         print(
-            "PayU Verify URL:",
-            PAYU_VERIFY_URL,
+            "PayU Payment Link URL:",
+            PAYU_PAYMENT_LINK_URL,
+        )
+
+        print(
+            "PayU Merchant ID:",
+            PAYU_MERCHANT_ID,
         )
 
         print(
@@ -2949,15 +3058,20 @@ async def main():
             "======================================"
         )
 
+
         await dp.start_polling(
             bot
         )
+
 
     finally:
 
         await runner.cleanup()
 
-        await bot.session.close()
+
+        if bot:
+
+            await bot.session.close()
 
 
 # ============================================================

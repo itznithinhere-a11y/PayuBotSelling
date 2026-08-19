@@ -227,7 +227,7 @@ PLANS = {
         ).strip(),
         "access_link": os.getenv(
             "GOLD_ACCESS_LINK",
-            "https://t.me/+jRvhmh1GHOkzYWE1",
+            "",
         ).strip(),
     },
 
@@ -252,7 +252,7 @@ PLANS = {
         ).strip(),
         "access_link": os.getenv(
             "SILVER_ACCESS_LINK",
-            "https://t.me/+jRvhmh1GHOkzYWE1",
+            "",
         ).strip(),
     },
 }

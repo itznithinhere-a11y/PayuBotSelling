@@ -73,7 +73,7 @@ PAYU_TOKEN_URL = os.getenv(
 # Production Payment Link endpoint
 PAYU_PAYMENT_LINK_URL = os.getenv(
     "PAYU_PAYMENT_LINK_URL",
-    "https://oneapi.payu.in/payment-links",
+    "https://partner.payu.in/payment-links",
 ).strip()
 
 

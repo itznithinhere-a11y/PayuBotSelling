@@ -3008,16 +3008,9 @@ async def main():
 # RUN
 # ============================================================
 
-    user_id: int,ain__":
-
+if __name__ == "__main__":
     try:
-
-        asyncio.run(
-            main()
-        )
+        asyncio.run(main())
 
     except KeyboardInterrupt:
-
-        print(
-            "Bot stopped."
-        )
+        print("Bot stopped.")

@@ -207,11 +207,11 @@ EXPIRY_REMINDER_HOURS = int(
 
 PLANS = {
     "gold": {
-        "name": "⚡ Gold Dark (Channel 1)",
+        "name": "🥇 Gold Premium",
         "price": int(
             os.getenv(
                 "GOLD_PRICE",
-                "1499",
+                "499",
             )
         ),
         "duration_days": int(
@@ -220,23 +220,23 @@ PLANS = {
                 "30",
             )
         ),
-        "description": "Gold Dark Access",
+        "description": "Gold Premium Access",
         "channel_id": os.getenv(
             "GOLD_CHANNEL_ID",
             "",
         ).strip(),
         "access_link": os.getenv(
             "GOLD_ACCESS_LINK",
-            "",
+            "https://t.me/+jRvhmh1GHOkzYWE1",
         ).strip(),
     },
 
     "silver": {
-        "name": "⚡ Silver Dark (Channel 2)",
+        "name": "🥈 Silver Premium",
         "price": int(
             os.getenv(
                 "SILVER_PRICE",
-                "1499",
+                "999",
             )
         ),
         "duration_days": int(
@@ -245,64 +245,14 @@ PLANS = {
                 "30",
             )
         ),
-        "description": "Silver Dark Access",
+        "description": "Silver Premium Access",
         "channel_id": os.getenv(
             "SILVER_CHANNEL_ID",
             "",
         ).strip(),
         "access_link": os.getenv(
             "SILVER_ACCESS_LINK",
-            "",
-        ).strip(),
-    },
-
-    "bronze": {
-        "name": "⚡ Bronze Dark (Channel 3)",
-        "price": int(
-            os.getenv(
-                "BRONZE_PRICE",
-                "1499",
-            )
-        ),
-        "duration_days": int(
-            os.getenv(
-                "BRONZE_DURATION_DAYS",
-                "30",
-            )
-        ),
-        "description": "Bronze Dark Access",
-        "channel_id": os.getenv(
-            "BRONZE_CHANNEL_ID",
-            "",
-        ).strip(),
-        "access_link": os.getenv(
-            "BRONZE_ACCESS_LINK",
-            "",
-        ).strip(),
-    },
-
-    "iron": {
-        "name": "⚡ Iron Dark (Channel 4)",
-        "price": int(
-            os.getenv(
-                "IRON_PRICE",
-                "1499",
-            )
-        ),
-        "duration_days": int(
-            os.getenv(
-                "IRON_DURATION_DAYS",
-                "30",
-            )
-        ),
-        "description": "Iron Dark Access",
-        "channel_id": os.getenv(
-            "IRON_CHANNEL_ID",
-            "",
-        ).strip(),
-        "access_link": os.getenv(
-            "IRON_ACCESS_LINK",
-            "",
+            "https://t.me/+jRvhmh1GHOkzYWE1",
         ).strip(),
     },
 }
@@ -1811,37 +1761,26 @@ def home_keyboard():
 
             [
                 InlineKeyboardButton(
-                    text="⚡ Gold Dark",
+                    text="🥇 GOLD PREMIUM • ₹499",
                     callback_data="plan:gold",
                 ),
+            ],
 
+            [
                 InlineKeyboardButton(
-                    text="⚡ Silver Dark",
+                    text="🥈 SILVER PREMIUM • ₹999",
                     callback_data="plan:silver",
                 ),
             ],
 
             [
                 InlineKeyboardButton(
-                    text="⚡ Bronze Dark",
-                    callback_data="plan:bronze",
-                ),
-
-                InlineKeyboardButton(
-                    text="⚡ Iron Dark",
-                    callback_data="plan:iron",
-                ),
-            ],
-
-            [
-                InlineKeyboardButton(
-                    text="📋 My Plans",
+                    text="📋 MY ACTIVE PLANS",
                     callback_data="myplans",
                 ),
             ],
         ]
     )
-
 
 def plan_keyboard(
     plan_key,
@@ -1851,15 +1790,17 @@ def plan_keyboard(
         plan_key
     ]
 
+    if plan_key == "gold":
+        pay_text = "🥇 UNLOCK GOLD • ₹499"
+    else:
+        pay_text = "🥈 UNLOCK SILVER • ₹999"
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
 
             [
                 InlineKeyboardButton(
-                    text=(
-                        f"💳 Pay ₹"
-                        f"{plan['price']}"
-                    ),
+                    text=pay_text,
                     callback_data=(
                         f"buy:{plan_key}"
                     ),
@@ -1868,20 +1809,19 @@ def plan_keyboard(
 
             [
                 InlineKeyboardButton(
-                    text="📋 My Plans",
+                    text="📋 MY ACTIVE PLANS",
                     callback_data="myplans",
                 )
             ],
 
             [
                 InlineKeyboardButton(
-                    text="↩️ Back",
+                    text="🏠 BACK TO STORE",
                     callback_data="home",
                 )
             ],
         ]
     )
-
 
 def payment_keyboard(
     checkout_url,
@@ -1954,21 +1894,19 @@ async def send_home(
     )
 
     text = (
-        "👋 <b>Welcome to DARK STORE</b>\n"
+        "✨ <b>WELCOME TO PREMIUM STORE</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
 
-        "🔥 <b>Premium Channel Access</b>\n\n"
+        "🔐 <b>Premium Channel Access</b>\n"
+        "⚡ Instant Access After Payment\n"
+        "🛡 Secure PayU Checkout\n"
+        "🚀 Automatic Verification\n\n"
 
-        "⚡ Gold Dark\n"
-        "⚡ Silver Dark\n"
-        "⚡ Bronze Dark\n"
-        "⚡ Iron Dark\n\n"
+        "💎 <b>CHOOSE YOUR PLAN</b>\n\n"
+        "🥇 <b>GOLD</b> — ₹499 / 30 Days\n"
+        "🥈 <b>SILVER</b> — ₹999 / 30 Days\n\n"
 
-        "💳 Secure PayU Checkout\n"
-        "🔐 Automatic Payment Verification\n"
-        "🔗 Automatic Channel Access\n"
-        "📋 Multiple Plans Support\n\n"
-
+        "📌 Access automatically Telegram par deliver hoga.\n\n"
         f"💬 Support: {support}"
     )
 
@@ -2067,21 +2005,31 @@ async def plan_callback(
         else f"⏳ {duration} Days"
     )
 
+    if plan_key == "gold":
+        benefits = (
+            "✨ Premium Channel Access\n"
+            "⚡ Fast Access Delivery\n"
+            "🛡 Secure PayU Payment"
+        )
+    else:
+        benefits = (
+            "💎 Premium Channel Access\n"
+            "🚀 Priority Access Delivery\n"
+            "🛡 Secure PayU Payment"
+        )
+
     text = (
         f"<b>{plan['name']}</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
 
-        f"💰 Price: "
-        f"<b>₹{plan['price']}</b>\n"
+        f"💰 Price: <b>₹{plan['price']}</b>\n"
+        f"📅 Duration: <b>{duration_text}</b>\n\n"
 
-        f"📅 Duration: "
-        f"<b>{duration_text}</b>\n\n"
-
-        "🔐 Secure PayU Checkout\n"
-        "⚡ Automatic Verification\n"
+        f"{benefits}\n"
+        "🔐 Automatic Verification\n"
         "🔗 Automatic Channel Access\n\n"
 
-        "👇 Continue karne ke liye Pay button dabao."
+        "👇 Continue karne ke liye neeche unlock button dabao."
     )
 
     await callback.message.answer(

@@ -67,6 +67,14 @@ PAYU_URL = os.getenv(
     "https://api.payu.in/v2/payments",
 ).strip()
 
+# PayU V2 Verify Payment API.
+# Production endpoint documented by PayU: info.payu.in/v3/transaction.
+# Keep this configurable because PayU accounts/environments can differ.
+PAYU_VERIFY_URL = os.getenv(
+    "PAYU_VERIFY_URL",
+    "https://info.payu.in/v3/transaction",
+).strip()
+
 
 # ============================================================
 # PUBLIC URL
@@ -119,8 +127,8 @@ SUPABASE_URL = os.getenv(
 ).strip().rstrip("/")
 
 
-SUPABASE_KEY = os.getenv(
-    "SUPABASE_KEY",
+SUPABASE_SERVICE_ROLE_KEY = os.getenv(
+    "SUPABASE_SERVICE_ROLE_KEY",
     "",
 ).strip()
 
@@ -602,6 +610,242 @@ async def create_payment(
         )
 
 # ============================================================
+# PAYU V2 VERIFY PAYMENT
+# ============================================================
+
+async def verify_payu_payment(
+    txn_id: str,
+):
+    """
+    Verify the transaction directly against PayU.
+
+    PayU V2 verification uses POST /v3/transaction with:
+      Info-Command: verify_payment
+      {"txnId": ["..."]}
+
+    The request is authenticated using the same SHA512 HMAC scheme
+    used by the V2 APIs: sha512(body|date|merchant_secret).
+    """
+
+    txn_id = str(txn_id or "").strip()
+
+    if not txn_id:
+        return {
+            "ok": False,
+            "status": "invalid",
+            "message": "Transaction ID missing.",
+            "raw": {},
+        }
+
+    payload = {
+        "txnId": [txn_id],
+    }
+
+    body = json.dumps(
+        payload,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+    date = format_datetime(
+        datetime.now(timezone.utc),
+        usegmt=True,
+    )
+
+    authorization = make_auth(
+        body,
+        date,
+    )
+
+    headers = {
+        "date": date,
+        "authorization": authorization,
+        "content-type": "application/json",
+        "accept": "application/json",
+        "Info-Command": "verify_payment",
+    }
+
+    print()
+    print("=" * 70)
+    print("PAYU VERIFY PAYMENT")
+    print("=" * 70)
+    print("URL:", PAYU_VERIFY_URL)
+    print("Transaction:", txn_id)
+    print("REQUEST BODY:", body)
+    print("=" * 70)
+
+    timeout = aiohttp.ClientTimeout(total=30)
+
+    try:
+        async with aiohttp.ClientSession(
+            timeout=timeout
+        ) as session:
+            async with session.post(
+                PAYU_VERIFY_URL,
+                data=body.encode("utf-8"),
+                headers=headers,
+            ) as response:
+                text = await response.text()
+
+                print("PAYU VERIFY HTTP:", response.status)
+                print("PAYU VERIFY RESPONSE:", text)
+
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError:
+                    return {
+                        "ok": False,
+                        "status": "error",
+                        "message": "PayU returned a non-JSON response.",
+                        "raw": {"http_status": response.status, "text": text},
+                    }
+
+                if response.status >= 400:
+                    return {
+                        "ok": False,
+                        "status": "error",
+                        "message": f"PayU HTTP {response.status}",
+                        "raw": data,
+                    }
+
+                result = data.get("result") if isinstance(data, dict) else None
+
+                if isinstance(result, list):
+                    item = result[0] if result else {}
+                elif isinstance(result, dict):
+                    item = result
+                else:
+                    item = {}
+
+                if not isinstance(item, dict):
+                    item = {}
+
+                payu_status = str(
+                    item.get("status")
+                    or item.get("unmappedStatus")
+                    or ""
+                ).strip().lower()
+
+                # PayU can return a successful API call with a transaction
+                # that is not found / not yet available.
+                message = str(
+                    item.get("message")
+                    or data.get("message")
+                    or item.get("errorMessage")
+                    or ""
+                )
+
+                if payu_status == "success":
+                    return {
+                        "ok": True,
+                        "status": "success",
+                        "message": message or "Payment successful.",
+                        "raw": data,
+                        "result": item,
+                        "txn_id": str(item.get("txnId") or txn_id),
+                        "payment_id": str(
+                            item.get("mihpayId")
+                            or item.get("mihpayid")
+                            or item.get("bankReferenceNumber")
+                            or item.get("bank_ref_num")
+                            or txn_id
+                        ),
+                        "amount": (
+                            item.get("amount")
+                            if item.get("amount") is not None
+                            else item.get("originalAmount")
+                        ),
+                    }
+
+                if payu_status in {
+                    "pending",
+                    "in progress",
+                    "initiated",
+                    "open",
+                    "queued",
+                }:
+                    normalized = "pending"
+                elif payu_status in {
+                    "failed",
+                    "failure",
+                    "cancelled",
+                    "canceled",
+                    "dropped",
+                    "bounced",
+                }:
+                    normalized = "failed"
+                else:
+                    # Includes "not found" and empty status. Do not mark
+                    # the order paid and do not claim success to the user.
+                    normalized = "pending"
+
+                return {
+                    "ok": False,
+                    "status": normalized,
+                    "message": message or "Payment status is not successful yet.",
+                    "raw": data,
+                    "result": item,
+                    "txn_id": txn_id,
+                }
+
+    except asyncio.TimeoutError:
+        return {
+            "ok": False,
+            "status": "error",
+            "message": "PayU verification timed out. Please retry.",
+            "raw": {},
+        }
+
+    except aiohttp.ClientError as e:
+        return {
+            "ok": False,
+            "status": "error",
+            "message": f"PayU verification HTTP error: {e}",
+            "raw": {},
+        }
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "status": "error",
+            "message": f"PayU verification error: {e}",
+            "raw": {},
+        }
+
+
+async def process_verified_payu_result(
+    verification: dict,
+):
+    """Convert a PayU Verify API success into the existing delivery flow."""
+
+    if not verification.get("ok"):
+        return False
+
+    txn_id = str(
+        verification.get("txn_id")
+        or ""
+    ).strip()
+
+    payment_id = str(
+        verification.get("payment_id")
+        or txn_id
+    ).strip()
+
+    amount = verification.get("amount")
+
+    data = {
+        "txnid": txn_id,
+        "mihpayid": payment_id,
+        "amount": amount,
+        "status": "success",
+    }
+
+    return await process_successful_payment(
+        data
+    )
+
+
+# ============================================================
 # SUPABASE REST
 # ============================================================
 
@@ -611,10 +855,10 @@ def supabase_headers(
 
     headers = {
         "apikey":
-            SUPABASE_KEY,
+            SUPABASE_SERVICE_ROLE_KEY,
 
         "Authorization":
-            f"Bearer {SUPABASE_KEY}",
+            f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
 
         "Content-Type":
             "application/json",
@@ -639,9 +883,9 @@ async def supabase_request(
             "SUPABASE_URL missing."
         )
 
-    if not SUPABASE_KEY:
+    if not SUPABASE_SERVICE_ROLE_KEY:
         raise RuntimeError(
-            "SUPABASE_KEY missing."
+            "SUPABASE_SERVICE_ROLE_KEY missing."
         )
 
     url = (
@@ -1988,51 +2232,125 @@ async def verify_callback(
 ):
 
     await callback.answer(
-        "Payment status check ho raha hai..."
+        "PayU se payment verify ho raha hai..."
     )
 
     txn_id = callback.data.split(
         ":",
         1,
-    )[1]
+    )[1].strip()
 
     order = await get_order_by_txn(
         txn_id
     )
 
     if not order:
-
         await callback.message.answer(
-            "❌ Order nahi mila."
+            "❌ <b>Order nahi mila.</b>\n\n"
+            "Transaction ID invalid ya purana ho sakta hai."
         )
-
         return
 
-    if (
-        int(order["user_id"])
-        != callback.from_user.id
-    ):
-
+    if int(order["user_id"]) != callback.from_user.id:
         await callback.message.answer(
             "❌ Ye order aapka nahi hai."
         )
-
         return
 
     if order.get("status") == "paid":
-
         await callback.message.answer(
             "✅ <b>Payment already confirmed.</b>\n\n"
             "Use /myplan."
         )
+        return
 
+    try:
+        verification = await verify_payu_payment(
+            txn_id
+        )
+    except Exception as e:
+        eid = error_id()
+        print(
+            f"[{eid}] MANUAL VERIFY ERROR:",
+            repr(e),
+        )
+        await callback.message.answer(
+            "⚠️ <b>Payment verification temporarily failed.</b>\n\n"
+            "Thodi der baad <b>Verify Payment</b> dobara press karein.\n\n"
+            f"Error ID: <code>{eid}</code>"
+        )
+        return
+
+    if verification.get("ok"):
+        try:
+            processed = await process_verified_payu_result(
+                verification
+            )
+        except Exception as e:
+            eid = error_id()
+            print(
+                f"[{eid}] VERIFIED PAYMENT PROCESSING ERROR:",
+                repr(e),
+            )
+            await callback.message.answer(
+                "⚠️ <b>PayU ne payment successful confirm kiya hai, "
+                "lekin access delivery mein problem aayi.</b>\n\n"
+                "Admin logs check karein. Payment ko dobara charge nahi kiya jayega.\n\n"
+                f"Error ID: <code>{eid}</code>"
+            )
+            return
+
+        if processed:
+            await callback.message.answer(
+                "🎉 <b>Payment verified successfully!</b>\n\n"
+                "Telegram par aapko access details bhej di gayi hain.\n"
+                "Use /myplan anytime."
+            )
+        else:
+            await callback.message.answer(
+                "⚠️ PayU verification successful thi, "
+                "lekin order process nahi ho saka. Admin logs check karein."
+            )
+        return
+
+    status = verification.get("status", "pending")
+    message = str(
+        verification.get("message")
+        or "Payment status available nahi hai."
+    )[:500]
+
+    if status == "failed":
+        try:
+            await update_order(
+                order["reference_id"],
+                {"status": "failed"},
+            )
+        except Exception as e:
+            print(
+                "Failed-order update error:",
+                repr(e),
+            )
+
+        await callback.message.answer(
+            "❌ <b>Payment successful nahi mila.</b>\n\n"
+            f"PayU status: <code>{message}</code>\n\n"
+            "Agar amount deduct hua hai to thodi der baad Verify Payment dobara karein."
+        )
+        return
+
+    if status == "error":
+        await callback.message.answer(
+            "⚠️ <b>PayU verification abhi complete nahi ho payi.</b>\n\n"
+            f"Reason: <code>{message}</code>\n\n"
+            "Thodi der baad Verify Payment dobara press karein."
+        )
         return
 
     await callback.message.answer(
-        "⏳ Payment verification PayU callback "
-        "ke through complete hogi.\n\n"
-        "Agar payment complete ho chuka hai to "
-        "thodi der wait karein."
+        "⏳ <b>Payment abhi confirm nahi hua.</b>\n\n"
+        f"PayU: <code>{message}</code>\n\n"
+        "Agar payment complete ho chuka hai to 10–30 seconds baad "
+        "Verify Payment dobara press karein."
     )
 
 
@@ -2409,23 +2727,14 @@ async def payu_success(
     data = {}
 
     try:
-
         if request.method == "POST":
-
             post = await request.post()
-
-            data.update(
-                dict(post)
-            )
+            data.update(dict(post))
 
         if request.query:
-
-            data.update(
-                dict(request.query)
-            )
+            data.update(dict(request.query))
 
     except Exception as e:
-
         print(
             "PayU success parse error:",
             repr(e),
@@ -2445,72 +2754,180 @@ async def payu_success(
     )
     print("=" * 70)
 
-    txn_id = (
+    txn_id = str(
         data.get("txnid")
         or data.get("txnId")
-    )
+        or data.get("transactionId")
+        or ""
+    ).strip()
 
-    # If PayU gives a hash, verify it.
-
-    if data.get("hash"):
-
-        valid_hash = (
-            verify_payu_callback_hash(
-                data
-            )
+    if not txn_id:
+        return web.Response(
+            status=400,
+            content_type="text/html",
+            text="""
+<!DOCTYPE html>
+<html>
+<head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Payment Verification</title></head>
+<body style="font-family:Arial;text-align:center;padding:40px">
+<h2>⚠️ Payment verification pending</h2>
+<p>Transaction ID PayU callback mein nahi mila.</p>
+<p>Please return to Telegram and press <b>Verify Payment</b>.</p>
+</body>
+</html>
+""",
         )
 
+    # If PayU sends a callback hash, validate it before trusting callback data.
+    # The final payment decision still comes from PayU's Verify Payment API.
+    if data.get("hash"):
+        valid_hash = verify_payu_callback_hash(data)
+
         if not valid_hash:
-
-            print(
-                "INVALID PAYU CALLBACK HASH"
-            )
-
+            print("INVALID PAYU CALLBACK HASH")
             return web.Response(
                 status=403,
                 text="Invalid payment signature.",
             )
 
-    status = str(
-        data.get(
-            "status",
-            "",
+    order = None
+
+    try:
+        order = await get_order_by_txn(txn_id)
+    except Exception as e:
+        print(
+            "Callback order lookup error:",
+            repr(e),
         )
-    ).lower().strip()
 
-    if status == "success":
+    if not order:
+        return web.Response(
+            status=404,
+            content_type="text/html",
+            text="""
+<!DOCTYPE html>
+<html>
+<head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Payment Verification</title></head>
+<body style="font-family:Arial;text-align:center;padding:40px">
+<h2>⚠️ Order not found</h2>
+<p>Please return to Telegram and contact support.</p>
+</body>
+</html>
+""",
+        )
 
+    # Never trust only the browser callback status. Always reconcile with PayU.
+    try:
+        verification = await verify_payu_payment(txn_id)
+    except Exception as e:
+        print(
+            "PayU callback verification error:",
+            repr(e),
+        )
+        verification = {
+            "ok": False,
+            "status": "error",
+            "message": "Verification request failed.",
+        }
+
+    if verification.get("ok"):
         try:
+            processed = await process_verified_payu_result(
+                verification
+            )
+        except Exception as e:
+            print(
+                "Verified callback processing error:",
+                repr(e),
+            )
+            processed = False
 
-            await process_successful_payment(
-                data
+        if processed:
+            return web.Response(
+                status=200,
+                content_type="text/html",
+                text="""
+<!DOCTYPE html>
+<html>
+<head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Payment Successful</title></head>
+<body style="font-family:Arial;text-align:center;padding:40px">
+<h2>✅ Payment Verified</h2>
+<p>Your payment has been verified successfully.</p>
+<p>🎉 Access details have been sent to your Telegram.</p>
+<p>You can close this page and return to Telegram.</p>
+</body>
+</html>
+""",
             )
 
-        except Exception as e:
+        return web.Response(
+            status=500,
+            content_type="text/html",
+            text="""
+<!DOCTYPE html>
+<html>
+<head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Payment Processing</title></head>
+<body style="font-family:Arial;text-align:center;padding:40px">
+<h2>⚠️ Payment verified, delivery pending</h2>
+<p>PayU confirmed the payment, but Telegram delivery could not be completed.</p>
+<p>Please return to Telegram and press <b>Verify Payment</b> again.</p>
+</body>
+</html>
+""",
+        )
 
+    status = verification.get("status", "pending")
+    message = str(
+        verification.get("message")
+        or "Payment is not confirmed yet."
+    )[:500]
+
+    if status == "failed":
+        try:
+            await update_order(
+                order["reference_id"],
+                {"status": "failed"},
+            )
+        except Exception as e:
             print(
-                "Payment processing error:",
+                "Callback failed-order update error:",
                 repr(e),
             )
 
-    return web.Response(
-
-        status=200,
-
-        content_type="text/html",
-
-        text="""
+        return web.Response(
+            status=200,
+            content_type="text/html",
+            text=f"""
 <!DOCTYPE html>
 <html>
-<head>
-<meta name="viewport"
-content="width=device-width,initial-scale=1">
-<title>Payment Successful</title>
-</head>
+<head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Payment Failed</title></head>
 <body style="font-family:Arial;text-align:center;padding:40px">
-<h2>✅ Payment Successful</h2>
-<p>Payment verification complete.</p>
-<p>Please return to Telegram.</p>
+<h2>❌ Payment Not Successful</h2>
+<p>PayU status: {message}</p>
+<p>Please return to Telegram and try again.</p>
+</body>
+</html>
+""",
+        )
+
+    return web.Response(
+        status=200,
+        content_type="text/html",
+        text=f"""
+<!DOCTYPE html>
+<html>
+<head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Payment Pending</title></head>
+<body style="font-family:Arial;text-align:center;padding:40px">
+<h2>⏳ Payment Verification Pending</h2>
+<p>PayU has not returned a final successful status yet.</p>
+<p>Status: {message}</p>
+<p>Return to Telegram and press <b>Verify Payment</b> after a short wait.</p>
 </body>
 </html>
 """,
@@ -2889,9 +3306,9 @@ def validate_config():
             "SUPABASE_URL missing"
         )
 
-    if not SUPABASE_KEY:
+    if not SUPABASE_SERVICE_ROLE_KEY:
         errors.append(
-            "SUPABASE_KEY missing"
+            "SUPABASE_SERVICE_ROLE_KEY missing"
         )
 
     if not PUBLIC_BASE_URL:
@@ -2965,6 +3382,10 @@ async def main():
     print(
         "PayU:",
         PAYU_URL,
+    )
+    print(
+        "PayU Verify:",
+        PAYU_VERIFY_URL,
     )
     print(
         "Supabase:",

@@ -315,15 +315,10 @@ def format_ts(ts: Optional[int]) -> str:
         return str(ts)
 
 
-def make_txnid(
-    user_id: int,
-) -> str:
-
+def make_txnid(user_id: int) -> str:
     random_part = secrets.token_hex(8)
 
-    txn_id = (
-        f"TG{user_id}{random_part}"
-    )
+    txn_id = f"TG{user_id}_{int(time.time())}_{random_part}"
 
     return txn_id[:50]
 
@@ -373,20 +368,29 @@ def make_auth(
 # OAuth Payment Links API is NOT used here.
 #
 # ============================================================
-
 async def create_payment(
     user_id: int,
     amount: str,
     plan_key: str,
 ):
+    txn_id = make_txnid(user_id)
 
-    txn_id = make_txnid(
-        user_id
-    )
+    plan = PLANS[plan_key]
 
-    plan = PLANS[
-        plan_key
-    ]
+    # PayU expects a valid decimal/string amount.
+    try:
+        amount_value = float(amount)
+    except Exception:
+        raise RuntimeError("Invalid payment amount.")
+
+    if amount_value <= 0:
+        raise RuntimeError("Payment amount must be greater than 0.")
+
+    if not SUCCESS_URL:
+        raise RuntimeError("SUCCESS_URL missing.")
+
+    if not FAILURE_URL:
+        raise RuntimeError("FAILURE_URL missing.")
 
     payload = {
         "accountId": PAYU_KEY,
@@ -396,53 +400,48 @@ async def create_payment(
         "currency": "INR",
 
         "order": {
-            "productInfo": plan[
-                "description"
-            ],
+            "productInfo": plan["description"],
+
+            "userDefinedFields": {
+                "udf1": str(user_id),
+                "udf2": plan_key,
+                "udf3": txn_id,
+            },
 
             "paymentChargeSpecification": {
-                "price": amount
-            }
+                "price": amount_value,
+            },
         },
 
         "billingDetails": {
             "firstName": "Telegram",
+            "lastName": "Customer",
 
             "email": (
-                f"telegram"
-                f"{user_id}"
-                f"@example.com"
+                f"telegram{user_id}"
+                "@example.com"
             ),
 
             "phone": "9999999999",
 
-            "address1": "India",
-
-            "city": "Indore",
-
-            "state": "Madhya Pradesh",
-
-            "country": "India",
-
-            "zipCode": "452001",
+            "address": {
+                "address1": "India",
+                "city": "Indore",
+                "state": "Madhya Pradesh",
+                "country": "India",
+                "zipCode": "452001",
+            },
         },
 
         "callBackActions": {
             "successAction": SUCCESS_URL,
-
             "failureAction": FAILURE_URL,
-
             "cancelAction": FAILURE_URL,
         },
 
         "additionalInfo": {
             "txnFlow": "nonseamless",
-
             "createOrder": True,
-
-            "udf1": str(user_id),
-
-            "udf2": plan_key,
         },
     }
 
@@ -453,9 +452,7 @@ async def create_payment(
     )
 
     date = format_datetime(
-        datetime.now(
-            timezone.utc
-        ),
+        datetime.now(timezone.utc),
         usegmt=True,
     )
 
@@ -466,41 +463,33 @@ async def create_payment(
 
     headers = {
         "date": date,
-
-        "authorization":
-            authorization,
-
-        "content-type":
-            "application/json",
-
-        "accept":
-            "application/json",
+        "authorization": authorization,
+        "content-type": "application/json",
+        "accept": "application/json",
     }
 
     print()
     print("=" * 70)
-    print("PAYU LIVE V2 REQUEST")
+    print("PAYU V2 PAYMENT REQUEST")
     print("=" * 70)
+    print("URL:", PAYU_URL)
+    print("Transaction:", txn_id)
+    print("Plan:", plan_key)
+    print("Amount:", amount_value)
+    print()
+    print("REQUEST BODY:")
     print(
-        "Transaction:",
-        txn_id,
-    )
-    print(
-        "Plan:",
-        plan_key,
-    )
-    print(
-        "Amount:",
-        amount,
+        json.dumps(
+            payload,
+            indent=2,
+            ensure_ascii=False,
+        )
     )
     print("=" * 70)
 
-    timeout = aiohttp.ClientTimeout(
-        total=30
-    )
+    timeout = aiohttp.ClientTimeout(total=30)
 
     try:
-
         async with aiohttp.ClientSession(
             timeout=timeout
         ) as session:
@@ -513,92 +502,67 @@ async def create_payment(
 
                 text = await response.text()
 
-                print(
-                    "PAYU HTTP:",
-                    response.status,
-                )
-
-                print(
-                    "PAYU RESPONSE:",
-                    text,
-                )
+                print("PAYU HTTP:", response.status)
+                print("PAYU RESPONSE:", text)
 
                 try:
-
-                    data = json.loads(
-                        text
-                    )
+                    data = json.loads(text)
 
                 except json.JSONDecodeError:
-
                     return (
                         None,
                         txn_id,
                         {
-                            "http_status":
-                                response.status,
-
-                            "raw_response":
-                                text,
+                            "http_status": response.status,
+                            "raw_response": text,
                         },
                     )
 
                 if response.status >= 400:
-
                     return (
                         None,
                         txn_id,
                         data,
                     )
 
+                # ---------------------------------------------
+                # PAYU RESPONSE
+                # ---------------------------------------------
+
                 checkout_url = None
 
-                if isinstance(
-                    data,
-                    dict,
-                ):
+                if isinstance(data, dict):
 
-                    result = data.get(
-                        "result"
-                    )
+                    result = data.get("result")
 
-                    if isinstance(
-                        result,
-                        dict,
-                    ):
+                    if isinstance(result, dict):
 
                         checkout_url = (
-                            result.get(
-                                "checkoutUrl"
-                            )
-                            or result.get(
-                                "checkoutURL"
-                            )
-                            or result.get(
-                                "checkout_url"
-                            )
-                            or result.get(
-                                "paymentUrl"
-                            )
-                            or result.get(
-                                "paymentURL"
-                            )
-                            or result.get(
-                                "payment_url"
-                            )
+                            result.get("checkoutUrl")
+                            or result.get("checkoutURL")
+                            or result.get("checkout_url")
+                            or result.get("paymentUrl")
+                            or result.get("paymentURL")
+                            or result.get("payment_url")
                         )
 
                     checkout_url = (
                         checkout_url
-                        or data.get(
-                            "checkoutUrl"
-                        )
-                        or data.get(
-                            "checkoutURL"
-                        )
-                        or data.get(
-                            "checkout_url"
-                        )
+                        or data.get("checkoutUrl")
+                        or data.get("checkoutURL")
+                        or data.get("checkout_url")
+                    )
+
+                # ---------------------------------------------
+                # IMPORTANT
+                # ---------------------------------------------
+
+                if not checkout_url:
+
+                    return (
+                        None,
+                        txn_id,
+                        data,
                     )
 
                 return (
@@ -613,8 +577,7 @@ async def create_payment(
             None,
             txn_id,
             {
-                "error":
-                    "PayU request timeout"
+                "error": "PayU request timeout"
             },
         )
 
@@ -624,8 +587,7 @@ async def create_payment(
             None,
             txn_id,
             {
-                "error":
-                    f"HTTP error: {e}"
+                "error": f"HTTP error: {e}"
             },
         )
 
@@ -635,11 +597,9 @@ async def create_payment(
             None,
             txn_id,
             {
-                "error":
-                    str(e)
+                "error": str(e)
             },
         )
-
 
 # ============================================================
 # SUPABASE REST
@@ -3048,7 +3008,7 @@ async def main():
 # RUN
 # ============================================================
 
-if __name__ == "__main__":
+    user_id: int,ain__":
 
     try:
 

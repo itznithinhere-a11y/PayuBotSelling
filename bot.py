@@ -189,7 +189,7 @@ EXPIRY_REMINDER_HOURS = int(
 PLANS = {
     "gold": {
         "name": "⚡ Gold Dark (Channel 1)",
-        "price": int(os.getenv("GOLD_PRICE", "1499")),
+        "price": int(os.getenv("GOLD_PRICE", "1")),
         "duration_days": int(
             os.getenv("GOLD_DURATION_DAYS", "30")
         ),

@@ -1,47 +1,13 @@
-# ============================================================
-# DARK STORE TELEGRAM BOT
-# PAYU OAUTH PAYMENT LINKS
-# ============================================================
-#
-# Features:
-# - Telegram Bot / aiogram 3
-# - PayU OAuth 2.0 Client Credentials
-# - PayU Payment Links
-# - Dynamic future expiry
-# - Automatic payment verification
-# - PayU transaction status API
-# - SQLite orders database
-# - Duplicate payment protection
-# - Amount validation
-# - Plan validation
-# - My Plan
-# - Manual Verify Payment
-# - Automatic access delivery
-# - One-time Telegram channel invite
-# - Fallback static access link
-# - Success / Failure redirect endpoints
-# - Health endpoint
-# - Background payment watcher
-#
-# IMPORTANT:
-# PayU Payment Links API is different from PayU _payment/QR API.
-# This code does NOT use PAYU_KEY / PAYU_SALT.
-#
-# ============================================================
-
-
 import asyncio
+import hashlib
 import json
 import os
 import secrets
-import sqlite3
 import time
-import uuid
-
-from contextlib import closing
-from datetime import datetime, timedelta
-from typing import Optional
-from urllib.parse import urlparse
+from datetime import datetime, timezone, timedelta
+from email.utils import format_datetime
+from typing import Any, Optional
+from urllib.parse import urlencode
 
 import aiohttp
 from aiohttp import web
@@ -68,7 +34,7 @@ load_dotenv()
 
 
 # ============================================================
-# BASIC CONFIG
+# CONFIG
 # ============================================================
 
 BOT_TOKEN = os.getenv(
@@ -78,85 +44,99 @@ BOT_TOKEN = os.getenv(
 
 
 # ============================================================
-# PAYU OAUTH CONFIG
+# EXISTING PAYU V2 CONFIG
 # ============================================================
 
-PAYU_CLIENT_ID = os.getenv(
-    "PAYU_CLIENT_ID",
-    "",
-).strip()
-
-PAYU_CLIENT_SECRET = os.getenv(
-    "PAYU_CLIENT_SECRET",
-    "",
-).strip()
-
-PAYU_MERCHANT_ID = os.getenv(
-    "PAYU_MERCHANT_ID",
+PAYU_KEY = os.getenv(
+    "PAYU_KEY",
     "",
 ).strip()
 
 
-PAYU_TOKEN_URL = os.getenv(
-    "PAYU_TOKEN_URL",
-    "https://accounts.payu.in/oauth/token",
+PAYU_SECRET = os.getenv(
+    "PAYU_SECRET",
+    "",
 ).strip()
 
 
-PAYU_PAYMENT_LINK_URL = os.getenv(
-    "PAYU_PAYMENT_LINK_URL",
-    "https://oneapi.payu.in/payment-links",
-).strip()
+# IMPORTANT:
+# Existing PayU V2 endpoint is kept unchanged.
 
-
-PAYU_TRANSACTION_URL = os.getenv(
-    "PAYU_TRANSACTION_URL",
-    "https://oneapi.payu.in/payment-links",
+PAYU_URL = os.getenv(
+    "PAYU_URL",
+    "https://api.payu.in/v2/payments",
 ).strip()
 
 
 # ============================================================
-# PAYMENT LINK SETTINGS
+# PUBLIC URL
 # ============================================================
 
-PAYMENT_LINK_EXPIRY_MINUTES = int(
-    os.getenv(
-        "PAYMENT_LINK_EXPIRY_MINUTES",
-        "30",
-    )
+PUBLIC_BASE_URL = os.getenv(
+    "PUBLIC_BASE_URL",
+    "",
+).strip().rstrip("/")
+
+
+SUCCESS_URL = (
+    f"{PUBLIC_BASE_URL}/payu/success"
+    if PUBLIC_BASE_URL
+    else ""
 )
 
-
-PAYMENT_CHECK_INTERVAL = int(
-    os.getenv(
-        "PAYMENT_CHECK_INTERVAL",
-        "20",
-    )
+FAILURE_URL = (
+    f"{PUBLIC_BASE_URL}/payu/failure"
+    if PUBLIC_BASE_URL
+    else ""
 )
 
 
 # ============================================================
-# WEB SERVER
+# SERVER
 # ============================================================
 
-WEBHOOK_HOST = os.getenv(
-    "WEBHOOK_HOST",
+HOST = os.getenv(
+    "HOST",
     "0.0.0.0",
 ).strip()
 
 
-WEBHOOK_PORT = int(
+PORT = int(
     os.getenv(
-        "WEBHOOK_PORT",
+        "PORT",
         "8080",
     )
 )
 
 
-PUBLIC_BASE_URL = os.getenv(
-    "PUBLIC_BASE_URL",
+# ============================================================
+# SUPABASE
+# ============================================================
+
+SUPABASE_URL = os.getenv(
+    "SUPABASE_URL",
     "",
-).rstrip("/")
+).strip().rstrip("/")
+
+
+SUPABASE_KEY = os.getenv(
+    "SUPABASE_KEY",
+    "",
+).strip()
+
+
+# ============================================================
+# ADMIN
+# ============================================================
+
+ADMIN_IDS = {
+    int(x.strip())
+    for x in os.getenv(
+        "ADMIN_IDS",
+        "",
+    ).split(",")
+    if x.strip().isdigit()
+}
 
 
 # ============================================================
@@ -166,94 +146,109 @@ PUBLIC_BASE_URL = os.getenv(
 SUPPORT_USERNAME = os.getenv(
     "SUPPORT_USERNAME",
     "",
+).strip().lstrip("@")
+
+
+# ============================================================
+# PAYMENT
+# ============================================================
+
+PAYMENT_AMOUNT = os.getenv(
+    "PAYMENT_AMOUNT",
+    "1",
 ).strip()
 
 
 # ============================================================
-# DATABASE
+# EXPIRY
 # ============================================================
 
-DB_PATH = os.getenv(
-    "DB_PATH",
-    "orders.db",
-).strip()
+# Reminder kitne hours pehle bhejna hai.
+
+EXPIRY_REMINDER_HOURS = int(
+    os.getenv(
+        "EXPIRY_REMINDER_HOURS",
+        "24",
+    )
+)
 
 
 # ============================================================
 # PLANS
 # ============================================================
+#
+# duration_days:
+#
+# 0 = Lifetime
+# 30 = 30 days
+# 90 = 90 days
+# 365 = 365 days
+#
+# ============================================================
 
 PLANS = {
-
     "gold": {
         "name": "⚡ Gold Dark (Channel 1)",
-
-        "price": 1499,
-
-        "description": "Gold Dark - Lifetime Access",
-
+        "price": int(os.getenv("GOLD_PRICE", "1499")),
+        "duration_days": int(
+            os.getenv("GOLD_DURATION_DAYS", "30")
+        ),
+        "description": "Gold Dark Access",
         "channel_id": os.getenv(
             "GOLD_CHANNEL_ID",
             "",
         ).strip(),
-
         "access_link": os.getenv(
             "GOLD_ACCESS_LINK",
             "",
         ).strip(),
     },
 
-
     "silver": {
         "name": "⚡ Silver Dark (Channel 2)",
-
-        "price": 1499,
-
-        "description": "Silver Dark - Lifetime Access",
-
+        "price": int(os.getenv("SILVER_PRICE", "1499")),
+        "duration_days": int(
+            os.getenv("SILVER_DURATION_DAYS", "30")
+        ),
+        "description": "Silver Dark Access",
         "channel_id": os.getenv(
             "SILVER_CHANNEL_ID",
             "",
         ).strip(),
-
         "access_link": os.getenv(
             "SILVER_ACCESS_LINK",
             "",
         ).strip(),
     },
 
-
     "bronze": {
         "name": "⚡ Bronze Dark (Channel 3)",
-
-        "price": 1499,
-
-        "description": "Bronze Dark - Lifetime Access",
-
+        "price": int(os.getenv("BRONZE_PRICE", "1499")),
+        "duration_days": int(
+            os.getenv("BRONZE_DURATION_DAYS", "30")
+        ),
+        "description": "Bronze Dark Access",
         "channel_id": os.getenv(
             "BRONZE_CHANNEL_ID",
             "",
         ).strip(),
-
         "access_link": os.getenv(
             "BRONZE_ACCESS_LINK",
             "",
         ).strip(),
     },
 
-
     "iron": {
         "name": "⚡ Iron Dark (Channel 4)",
-
-        "price": 1499,
-
-        "description": "Iron Dark - Lifetime Access",
-
+        "price": int(os.getenv("IRON_PRICE", "1499")),
+        "duration_days": int(
+            os.getenv("IRON_DURATION_DAYS", "30")
+        ),
+        "description": "Iron Dark Access",
         "channel_id": os.getenv(
             "IRON_CHANNEL_ID",
             "",
         ).strip(),
-
         "access_link": os.getenv(
             "IRON_ACCESS_LINK",
             "",
@@ -266,66 +261,25 @@ PLANS = {
 # GLOBALS
 # ============================================================
 
-router = Router()
-
 bot: Optional[Bot] = None
 
-payment_watcher_task: Optional[asyncio.Task] = None
+router = Router()
 
-oauth_token_cache = {
-    "access_token": "",
-    "expires_at": 0,
-}
+expiry_task: Optional[asyncio.Task] = None
 
-
-# ============================================================
-# LOGGING
-# ============================================================
-
-def error_id():
-    return (
-        f"E-{int(time.time())}-"
-        f"{secrets.token_hex(3).upper()}"
-    )
-
-
-def log_error(
-    title,
-    details=None,
-):
-    print()
-    print("=" * 80)
-    print(title)
-
-    if details is not None:
-        print(
-            json.dumps(
-                details,
-                indent=2,
-                ensure_ascii=False,
-                default=str,
-            )
-            if isinstance(details, (dict, list))
-            else details
-        )
-
-    print("=" * 80)
-    print()
+http_session: Optional[aiohttp.ClientSession] = None
 
 
 # ============================================================
-# TIME
+# HELPERS
 # ============================================================
 
-def india_now():
-    """
-    Return current India time.
+def now_ts() -> int:
+    return int(time.time())
 
-    ZoneInfo is used when available.
-    """
 
+def india_now() -> datetime:
     try:
-
         from zoneinfo import ZoneInfo
 
         return datetime.now(
@@ -333,606 +287,217 @@ def india_now():
         )
 
     except Exception:
-
-        # Fallback: UTC + 5:30
-
-        return datetime.utcnow() + timedelta(
+        return datetime.now(
+            timezone.utc
+        ) + timedelta(
             hours=5,
             minutes=30,
         )
 
 
-def payu_expiry_datetime():
-    """
-    Generate a future PayU expiry datetime.
-
-    PayU expects:
-        YYYY-MM-DD HH:mm:ss
-
-    Extra 60-second safety margin is added.
-    """
-
-    expiry = (
-        india_now()
-        + timedelta(
-            minutes=PAYMENT_LINK_EXPIRY_MINUTES,
-            seconds=60,
-        )
-    )
-
-    return expiry.strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-
-
-# ============================================================
-# DATABASE
-# ============================================================
-
-def db():
-
-    conn = sqlite3.connect(
-        DB_PATH,
-        timeout=30,
-    )
-
-    conn.row_factory = sqlite3.Row
-
-    return conn
-
-
-def init_db():
-
-    with closing(db()) as conn:
-
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS orders (
-
-                reference_id TEXT PRIMARY KEY,
-
-                user_id INTEGER NOT NULL,
-
-                plan_key TEXT NOT NULL,
-
-                amount_paise INTEGER NOT NULL,
-
-                invoice_number TEXT UNIQUE,
-
-                payment_link TEXT,
-
-                status TEXT NOT NULL DEFAULT 'created',
-
-                payment_id TEXT,
-
-                created_at INTEGER NOT NULL,
-
-                expiry_at INTEGER,
-
-                paid_at INTEGER,
-
-                access_sent INTEGER NOT NULL DEFAULT 0,
-
-                last_checked_at INTEGER,
-
-                check_count INTEGER NOT NULL DEFAULT 0
-            )
-            """
-        )
-
-
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS
-            idx_orders_user_id
-            ON orders(user_id)
-            """
-        )
-
-
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS
-            idx_orders_status
-            ON orders(status)
-            """
-        )
-
-
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS processed_events (
-
-                event_id TEXT PRIMARY KEY,
-
-                created_at INTEGER NOT NULL
-            )
-            """
-        )
-
-
-        conn.commit()
-
-
-# ============================================================
-# SAVE ORDER
-# ============================================================
-
-def save_order(
-    reference_id: str,
-    user_id: int,
-    plan_key: str,
-    amount_paise: int,
-):
-
-    with closing(db()) as conn:
-
-        conn.execute(
-            """
-            INSERT INTO orders
-            (
-                reference_id,
-                user_id,
-                plan_key,
-                amount_paise,
-                status,
-                created_at
-            )
-            VALUES
-            (
-                ?,
-                ?,
-                ?,
-                ?,
-                'created',
-                ?
-            )
-            """,
-            (
-                reference_id,
-                user_id,
-                plan_key,
-                amount_paise,
-                int(time.time()),
-            ),
-        )
-
-        conn.commit()
-
-
-# ============================================================
-# UPDATE PAYMENT LINK
-# ============================================================
-
-def update_payment_link(
-    reference_id: str,
-    invoice_number: str,
-    payment_link: str,
-    expiry_at: int,
-):
-
-    with closing(db()) as conn:
-
-        conn.execute(
-            """
-            UPDATE orders
-
-            SET
-                invoice_number = ?,
-                payment_link = ?,
-                expiry_at = ?
-
-            WHERE reference_id = ?
-            """,
-            (
-                invoice_number,
-                payment_link,
-                expiry_at,
-                reference_id,
-            ),
-        )
-
-        conn.commit()
-
-
-# ============================================================
-# GET ORDER
-# ============================================================
-
-def get_order(
-    reference_id: str,
-):
-
-    with closing(db()) as conn:
-
-        row = conn.execute(
-            """
-            SELECT *
-            FROM orders
-            WHERE reference_id = ?
-            """,
-            (
-                reference_id,
-            ),
-        ).fetchone()
-
-        return (
-            dict(row)
-            if row
-            else None
-        )
-
-
-# ============================================================
-# GET BY INVOICE
-# ============================================================
-
-def get_order_by_invoice(
-    invoice_number: str,
-):
-
-    with closing(db()) as conn:
-
-        row = conn.execute(
-            """
-            SELECT *
-            FROM orders
-            WHERE invoice_number = ?
-            """,
-            (
-                invoice_number,
-            ),
-        ).fetchone()
-
-        return (
-            dict(row)
-            if row
-            else None
-        )
-
-
-# ============================================================
-# LATEST USER ORDER
-# ============================================================
-
-def get_latest_order(
-    user_id: int,
-):
-
-    with closing(db()) as conn:
-
-        row = conn.execute(
-            """
-            SELECT *
-            FROM orders
-
-            WHERE user_id = ?
-
-            ORDER BY created_at DESC
-
-            LIMIT 1
-            """,
-            (
-                user_id,
-            ),
-        ).fetchone()
-
-        return (
-            dict(row)
-            if row
-            else None
-        )
-
-
-# ============================================================
-# PAID ORDERS FOR WATCHER
-# ============================================================
-
-def get_pending_orders():
-
-    with closing(db()) as conn:
-
-        rows = conn.execute(
-            """
-            SELECT *
-            FROM orders
-
-            WHERE status IN (
-                'created',
-                'pending'
-            )
-
-            AND invoice_number IS NOT NULL
-
-            ORDER BY created_at ASC
-
-            LIMIT 100
-            """
-        ).fetchall()
-
-        return [
-            dict(row)
-            for row in rows
-        ]
-
-
-# ============================================================
-# MARK PENDING
-# ============================================================
-
-def mark_pending(
-    reference_id: str,
-):
-
-    with closing(db()) as conn:
-
-        conn.execute(
-            """
-            UPDATE orders
-
-            SET
-                status = 'pending',
-                last_checked_at = ?,
-                check_count = check_count + 1
-
-            WHERE reference_id = ?
-            """,
-            (
-                int(time.time()),
-                reference_id,
-            ),
-        )
-
-        conn.commit()
-
-
-# ============================================================
-# MARK PAID
-# ============================================================
-
-def mark_paid(
-    reference_id: str,
-    payment_id: str,
-):
-
-    with closing(db()) as conn:
-
-        conn.execute(
-            """
-            UPDATE orders
-
-            SET
-                status = 'paid',
-                payment_id = ?,
-                paid_at = ?,
-                last_checked_at = ?
-
-            WHERE reference_id = ?
-            """,
-            (
-                payment_id,
-                int(time.time()),
-                int(time.time()),
-                reference_id,
-            ),
-        )
-
-        conn.commit()
-
-
-# ============================================================
-# MARK FAILED
-# ============================================================
-
-def mark_failed(
-    reference_id: str,
-):
-
-    with closing(db()) as conn:
-
-        conn.execute(
-            """
-            UPDATE orders
-
-            SET
-                status = 'failed',
-                last_checked_at = ?
-
-            WHERE reference_id = ?
-            """,
-            (
-                int(time.time()),
-                reference_id,
-            ),
-        )
-
-        conn.commit()
-
-
-# ============================================================
-# MARK EXPIRED
-# ============================================================
-
-def mark_expired(
-    reference_id: str,
-):
-
-    with closing(db()) as conn:
-
-        conn.execute(
-            """
-            UPDATE orders
-
-            SET
-                status = 'expired',
-                last_checked_at = ?
-
-            WHERE reference_id = ?
-            """,
-            (
-                int(time.time()),
-                reference_id,
-            ),
-        )
-
-        conn.commit()
-
-
-# ============================================================
-# MARK ACCESS SENT
-# ============================================================
-
-def mark_access_sent(
-    reference_id: str,
-):
-
-    with closing(db()) as conn:
-
-        conn.execute(
-            """
-            UPDATE orders
-
-            SET access_sent = 1
-
-            WHERE reference_id = ?
-            """,
-            (
-                reference_id,
-            ),
-        )
-
-        conn.commit()
-
-
-# ============================================================
-# EVENTS
-# ============================================================
-
-def event_already_processed(
-    event_id: str,
-):
-
-    if not event_id:
-        return False
-
-    with closing(db()) as conn:
-
-        row = conn.execute(
-            """
-            SELECT 1
-            FROM processed_events
-            WHERE event_id = ?
-            """,
-            (
-                event_id,
-            ),
-        ).fetchone()
-
-        return bool(row)
-
-
-def save_event(
-    event_id: str,
-):
-
-    if not event_id:
-        return
-
-    with closing(db()) as conn:
-
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO processed_events
-            (
-                event_id,
-                created_at
-            )
-            VALUES
-            (
-                ?,
-                ?
-            )
-            """,
-            (
-                event_id,
-                int(time.time()),
-            ),
-        )
-
-        conn.commit()
-
-
-# ============================================================
-# HTTP HELPERS
-# ============================================================
-
-async def read_json_response(
-    response,
-):
-
-    text = await response.text()
+def format_ts(ts: Optional[int]) -> str:
+    if not ts:
+        return "-"
 
     try:
-        return json.loads(text)
+        from zoneinfo import ZoneInfo
+
+        dt = datetime.fromtimestamp(
+            ts,
+            ZoneInfo("Asia/Kolkata"),
+        )
+
+        return dt.strftime(
+            "%d %b %Y, %I:%M %p"
+        )
 
     except Exception:
-
-        return {
-            "raw": text
-        }
+        return str(ts)
 
 
-# ============================================================
-# PAYU OAUTH TOKEN
-# ============================================================
+def make_txnid(
+    user_id: int,
+) -> str:
 
-async def get_payu_access_token(
-    force_refresh=False,
-):
+    random_part = secrets.token_hex(8)
 
-    global oauth_token_cache
+    txn_id = (
+        f"TG{user_id}{random_part}"
+    )
 
-    now = int(
-        time.time()
+    return txn_id[:50]
+
+
+def error_id() -> str:
+    return (
+        f"E-{now_ts()}-"
+        f"{secrets.token_hex(3).upper()}"
     )
 
 
-    if (
-        not force_refresh
-        and oauth_token_cache.get(
-            "access_token"
-        )
-        and now
-        < oauth_token_cache.get(
-            "expires_at",
-            0,
-        )
-    ):
+# ============================================================
+# PAYU V2 AUTH
+# ============================================================
 
-        return oauth_token_cache[
-            "access_token"
-        ]
+def make_auth(
+    body: str,
+    date: str,
+) -> str:
 
+    raw = (
+        f"{body}|"
+        f"{date}|"
+        f"{PAYU_SECRET}"
+    )
+
+    signature = hashlib.sha512(
+        raw.encode("utf-8")
+    ).hexdigest()
+
+    authorization = (
+        f'hmac username="{PAYU_KEY}",'
+        f' algorithm="sha512",'
+        f' headers="date",'
+        f' signature="{signature}"'
+    )
+
+    return authorization
+
+
+# ============================================================
+# PAYU V2 PAYMENT CREATION
+# ============================================================
+#
+# THIS IS THE EXISTING PAYU V2 FLOW.
+#
+# OAuth Payment Links API is NOT used here.
+#
+# ============================================================
+
+async def create_payment(
+    user_id: int,
+    amount: str,
+    plan_key: str,
+):
+
+    txn_id = make_txnid(
+        user_id
+    )
+
+    plan = PLANS[
+        plan_key
+    ]
 
     payload = {
-        "client_id": PAYU_CLIENT_ID,
+        "accountId": PAYU_KEY,
 
-        "client_secret": PAYU_CLIENT_SECRET,
+        "txnId": txn_id,
 
-        "grant_type": "client_credentials",
+        "currency": "INR",
 
-        "scope": (
-            "create_payment_links "
-            "read_payment_links "
-            "update_payment_links"
-        ),
+        "order": {
+            "productInfo": plan[
+                "description"
+            ],
+
+            "paymentChargeSpecification": {
+                "price": amount
+            }
+        },
+
+        "billingDetails": {
+            "firstName": "Telegram",
+
+            "email": (
+                f"telegram"
+                f"{user_id}"
+                f"@example.com"
+            ),
+
+            "phone": "9999999999",
+
+            "address1": "India",
+
+            "city": "Indore",
+
+            "state": "Madhya Pradesh",
+
+            "country": "India",
+
+            "zipCode": "452001",
+        },
+
+        "callBackActions": {
+            "successAction": SUCCESS_URL,
+
+            "failureAction": FAILURE_URL,
+
+            "cancelAction": FAILURE_URL,
+        },
+
+        "additionalInfo": {
+            "txnFlow": "nonseamless",
+
+            "createOrder": True,
+
+            "udf1": str(user_id),
+
+            "udf2": plan_key,
+        },
     }
 
+    body = json.dumps(
+        payload,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+    date = format_datetime(
+        datetime.now(
+            timezone.utc
+        ),
+        usegmt=True,
+    )
+
+    authorization = make_auth(
+        body,
+        date,
+    )
+
+    headers = {
+        "date": date,
+
+        "authorization":
+            authorization,
+
+        "content-type":
+            "application/json",
+
+        "accept":
+            "application/json",
+    }
+
+    print()
+    print("=" * 70)
+    print("PAYU LIVE V2 REQUEST")
+    print("=" * 70)
+    print(
+        "Transaction:",
+        txn_id,
+    )
+    print(
+        "Plan:",
+        plan_key,
+    )
+    print(
+        "Amount:",
+        amount,
+    )
+    print("=" * 70)
 
     timeout = aiohttp.ClientTimeout(
         total=30
     )
-
 
     try:
 
@@ -941,561 +506,1153 @@ async def get_payu_access_token(
         ) as session:
 
             async with session.post(
-                PAYU_TOKEN_URL,
-
-                data=payload,
-
-                headers={
-                    "Content-Type":
-                        "application/x-www-form-urlencoded",
-
-                    "Accept":
-                        "application/json",
-                },
+                PAYU_URL,
+                data=body.encode("utf-8"),
+                headers=headers,
             ) as response:
 
-                result = await read_json_response(
-                    response
+                text = await response.text()
+
+                print(
+                    "PAYU HTTP:",
+                    response.status,
                 )
 
+                print(
+                    "PAYU RESPONSE:",
+                    text,
+                )
 
-                if response.status >= 400:
+                try:
 
-                    log_error(
-                        "PAYU OAUTH ERROR",
+                    data = json.loads(
+                        text
+                    )
+
+                except json.JSONDecodeError:
+
+                    return (
+                        None,
+                        txn_id,
                         {
                             "http_status":
                                 response.status,
 
-                            "response":
-                                result,
+                            "raw_response":
+                                text,
                         },
                     )
 
-                    raise RuntimeError(
-                        "PayU OAuth failed."
+                if response.status >= 400:
+
+                    return (
+                        None,
+                        txn_id,
+                        data,
                     )
 
+                checkout_url = None
+
+                if isinstance(
+                    data,
+                    dict,
+                ):
+
+                    result = data.get(
+                        "result"
+                    )
+
+                    if isinstance(
+                        result,
+                        dict,
+                    ):
+
+                        checkout_url = (
+                            result.get(
+                                "checkoutUrl"
+                            )
+                            or result.get(
+                                "checkoutURL"
+                            )
+                            or result.get(
+                                "checkout_url"
+                            )
+                            or result.get(
+                                "paymentUrl"
+                            )
+                            or result.get(
+                                "paymentURL"
+                            )
+                            or result.get(
+                                "payment_url"
+                            )
+                        )
+
+                    checkout_url = (
+                        checkout_url
+                        or data.get(
+                            "checkoutUrl"
+                        )
+                        or data.get(
+                            "checkoutURL"
+                        )
+                        or data.get(
+                            "checkout_url"
+                        )
+                    )
+
+                return (
+                    checkout_url,
+                    txn_id,
+                    data,
+                )
 
     except asyncio.TimeoutError:
 
-        raise RuntimeError(
-            "PayU OAuth request timed out."
+        return (
+            None,
+            txn_id,
+            {
+                "error":
+                    "PayU request timeout"
+            },
         )
-
 
     except aiohttp.ClientError as e:
 
-        raise RuntimeError(
-            f"PayU OAuth network error: {e}"
+        return (
+            None,
+            txn_id,
+            {
+                "error":
+                    f"HTTP error: {e}"
+            },
         )
 
+    except Exception as e:
 
-    access_token = result.get(
-        "access_token"
-    )
-
-
-    if not access_token:
-
-        log_error(
-            "PAYU OAUTH TOKEN MISSING",
-            result,
+        return (
+            None,
+            txn_id,
+            {
+                "error":
+                    str(e)
+            },
         )
-
-        raise RuntimeError(
-            "PayU did not return access_token."
-        )
-
-
-    expires_in = int(
-        result.get(
-            "expires_in",
-            3600,
-        )
-    )
-
-
-    # Keep 60 seconds safety margin.
-
-    oauth_token_cache = {
-        "access_token":
-            access_token,
-
-        "expires_at":
-            now + max(
-                60,
-                expires_in - 60,
-            ),
-    }
-
-
-    return access_token
 
 
 # ============================================================
-# PAYU API REQUEST
+# SUPABASE REST
 # ============================================================
 
-async def payu_request(
-    method: str,
-    url: str,
-    *,
-    json_data=None,
-    params=None,
-    retry_auth=True,
+def supabase_headers(
+    prefer: Optional[str] = None,
 ):
 
-    token = await get_payu_access_token()
-
-
     headers = {
-        "Authorization":
-            f"Bearer {token}",
+        "apikey":
+            SUPABASE_KEY,
 
-        "merchantId":
-            PAYU_MERCHANT_ID,
+        "Authorization":
+            f"Bearer {SUPABASE_KEY}",
 
         "Content-Type":
             "application/json",
-
-        "Accept":
-            "application/json",
     }
 
+    if prefer:
+        headers["Prefer"] = prefer
+
+    return headers
+
+
+async def supabase_request(
+    method: str,
+    table: str,
+    *,
+    params=None,
+    json_data=None,
+):
+
+    if not SUPABASE_URL:
+        raise RuntimeError(
+            "SUPABASE_URL missing."
+        )
+
+    if not SUPABASE_KEY:
+        raise RuntimeError(
+            "SUPABASE_KEY missing."
+        )
+
+    url = (
+        f"{SUPABASE_URL}"
+        f"/rest/v1/"
+        f"{table}"
+    )
 
     timeout = aiohttp.ClientTimeout(
         total=30
     )
 
+    async with aiohttp.ClientSession(
+        timeout=timeout
+    ) as session:
 
-    try:
+        async with session.request(
+            method,
+            url,
+            params=params,
+            json=json_data,
+            headers=supabase_headers(
+                "return=representation"
+            ),
+        ) as response:
 
-        async with aiohttp.ClientSession(
-            timeout=timeout
-        ) as session:
+            text = await response.text()
 
-            async with session.request(
-                method,
+            if not text:
+                data = None
 
-                url,
+            else:
 
-                json=json_data,
+                try:
+                    data = json.loads(
+                        text
+                    )
 
-                params=params,
+                except Exception:
+                    data = {
+                        "raw": text
+                    }
 
-                headers=headers,
-            ) as response:
+            if response.status >= 400:
 
-                result = await read_json_response(
-                    response
+                raise RuntimeError(
+                    f"Supabase HTTP "
+                    f"{response.status}: "
+                    f"{text[:1000]}"
                 )
 
-
-                # OAuth token may have expired.
-
-                if (
-                    response.status == 401
-                    and retry_auth
-                ):
-
-                    await get_payu_access_token(
-                        force_refresh=True
-                    )
-
-                    return await payu_request(
-                        method,
-
-                        url,
-
-                        json_data=json_data,
-
-                        params=params,
-
-                        retry_auth=False,
-                    )
-
-
-                if response.status >= 400:
-
-                    raise RuntimeError(
-                        "PayU API HTTP "
-                        f"{response.status}: "
-                        f"{json.dumps(result, ensure_ascii=False)}"
-                    )
-
-
-                return result
-
-
-    except asyncio.TimeoutError:
-
-        raise RuntimeError(
-            "PayU API request timed out."
-        )
-
-
-    except aiohttp.ClientError as e:
-
-        raise RuntimeError(
-            f"PayU API network error: {e}"
-        )
+            return data
 
 
 # ============================================================
-# CREATE PAYU PAYMENT LINK
+# SUPABASE USER
 # ============================================================
 
-async def create_payu_payment_link(
-    user_id: int,
-    plan_key: str,
-    firstname: str,
+async def save_user(
+    tg_user,
 ):
 
-    if plan_key not in PLANS:
+    data = {
+        "user_id":
+            tg_user.id,
 
-        raise RuntimeError(
-            "Invalid plan."
+        "username":
+            tg_user.username,
+
+        "first_name":
+            tg_user.first_name,
+
+        "last_name":
+            tg_user.last_name,
+
+        "updated_at":
+            now_ts(),
+    }
+
+    # Upsert by user_id.
+
+    await supabase_request(
+        "POST",
+        "bot_users",
+        params={
+            "on_conflict":
+                "user_id",
+        },
+        json_data=data,
+    )
+
+
+# ============================================================
+# CREATE ORDER
+# ============================================================
+
+async def create_order(
+    *,
+    reference_id: str,
+    user_id: int,
+    plan_key: str,
+    amount_paise: int,
+    txn_id: str,
+):
+
+    data = {
+        "reference_id":
+            reference_id,
+
+        "user_id":
+            user_id,
+
+        "plan_key":
+            plan_key,
+
+        "amount_paise":
+            amount_paise,
+
+        "txn_id":
+            txn_id,
+
+        "status":
+            "created",
+
+        "created_at":
+            now_ts(),
+
+        "access_sent":
+            False,
+    }
+
+    result = await supabase_request(
+        "POST",
+        "orders",
+        json_data=data,
+    )
+
+    if isinstance(
+        result,
+        list,
+    ) and result:
+
+        return result[0]
+
+    return result
+
+
+# ============================================================
+# GET ORDER
+# ============================================================
+
+async def get_order(
+    reference_id: str,
+):
+
+    result = await supabase_request(
+        "GET",
+        "orders",
+        params={
+            "reference_id":
+                f"eq.{reference_id}",
+
+            "limit":
+                "1",
+        },
+    )
+
+    if isinstance(
+        result,
+        list,
+    ) and result:
+
+        return result[0]
+
+    return None
+
+
+# ============================================================
+# GET ORDER BY TXN
+# ============================================================
+
+async def get_order_by_txn(
+    txn_id: str,
+):
+
+    result = await supabase_request(
+        "GET",
+        "orders",
+        params={
+            "txn_id":
+                f"eq.{txn_id}",
+
+            "limit":
+                "1",
+        },
+    )
+
+    if isinstance(
+        result,
+        list,
+    ) and result:
+
+        return result[0]
+
+    return None
+
+
+# ============================================================
+# GET LATEST USER ORDER
+# ============================================================
+
+async def get_latest_paid_subscription(
+    user_id: int,
+):
+
+    result = await supabase_request(
+        "GET",
+        "subscriptions",
+        params={
+            "user_id":
+                f"eq.{user_id}",
+
+            "status":
+                "eq.active",
+
+            "order":
+                "expires_at.desc",
+
+            "limit":
+                "1",
+        },
+    )
+
+    if isinstance(
+        result,
+        list,
+    ) and result:
+
+        return result[0]
+
+    return None
+
+
+# ============================================================
+# UPDATE ORDER
+# ============================================================
+
+async def update_order(
+    reference_id: str,
+    values: dict,
+):
+
+    result = await supabase_request(
+        "PATCH",
+        "orders",
+        params={
+            "reference_id":
+                f"eq.{reference_id}",
+        },
+        json_data=values,
+    )
+
+    return result
+
+
+# ============================================================
+# SUBSCRIPTION
+# ============================================================
+
+async def create_subscription(
+    order: dict,
+    payment_id: str,
+):
+
+    plan = PLANS[
+        order[
+            "plan_key"
+        ]
+    ]
+
+    duration_days = int(
+        plan.get(
+            "duration_days",
+            0,
+        )
+    )
+
+    started_at = now_ts()
+
+    if duration_days <= 0:
+
+        expires_at = None
+
+    else:
+
+        expires_at = (
+            started_at
+            + duration_days * 86400
         )
 
+    # If same user/plan already has active
+    # subscription, extend from existing expiry.
+
+    existing = await supabase_request(
+        "GET",
+        "subscriptions",
+        params={
+            "user_id":
+                f"eq.{order['user_id']}",
+
+            "plan_key":
+                f"eq.{order['plan_key']}",
+
+            "status":
+                "eq.active",
+
+            "order":
+                "expires_at.desc",
+
+            "limit":
+                "1",
+        },
+    )
+
+    if (
+        duration_days > 0
+        and isinstance(existing, list)
+        and existing
+    ):
+
+        old_expiry = (
+            existing[0].get(
+                "expires_at"
+            )
+        )
+
+        if old_expiry:
+
+            try:
+
+                old_expiry_int = int(
+                    old_expiry
+                )
+
+                if old_expiry_int > started_at:
+
+                    expires_at = (
+                        old_expiry_int
+                        + duration_days * 86400
+                    )
+
+            except Exception:
+                pass
+
+    data = {
+        "user_id":
+            order["user_id"],
+
+        "order_reference":
+            order["reference_id"],
+
+        "plan_key":
+            order["plan_key"],
+
+        "status":
+            "active",
+
+        "started_at":
+            started_at,
+
+        "expires_at":
+            expires_at,
+
+        "payment_id":
+            payment_id,
+
+        "access_link":
+            None,
+
+        "reminder_sent":
+            False,
+
+        "expired_alert_sent":
+            False,
+    }
+
+    result = await supabase_request(
+        "POST",
+        "subscriptions",
+        json_data=data,
+    )
+
+    if isinstance(
+        result,
+        list,
+    ) and result:
+
+        return result[0]
+
+    return result
+
+
+# ============================================================
+# GET ALL ACTIVE SUBSCRIPTIONS
+# ============================================================
+
+async def get_active_subscriptions():
+
+    result = await supabase_request(
+        "GET",
+        "subscriptions",
+        params={
+            "status":
+                "eq.active",
+
+            "limit":
+                "1000",
+        },
+    )
+
+    return (
+        result
+        if isinstance(
+            result,
+            list,
+        )
+        else []
+    )
+
+
+# ============================================================
+# UPDATE SUBSCRIPTION
+# ============================================================
+
+async def update_subscription(
+    subscription_id: int,
+    values: dict,
+):
+
+    return await supabase_request(
+        "PATCH",
+        "subscriptions",
+        params={
+            "id":
+                f"eq.{subscription_id}",
+        },
+        json_data=values,
+    )
+
+
+# ============================================================
+# EVENT DEDUPE
+# ============================================================
+
+async def event_processed(
+    event_id: str,
+):
+
+    result = await supabase_request(
+        "GET",
+        "processed_events",
+        params={
+            "event_id":
+                f"eq.{event_id}",
+
+            "limit":
+                "1",
+        },
+    )
+
+    return bool(
+        isinstance(
+            result,
+            list,
+        )
+        and result
+    )
+
+
+async def save_event(
+    event_id: str,
+):
+
+    await supabase_request(
+        "POST",
+        "processed_events",
+        json_data={
+            "event_id":
+                event_id,
+
+            "created_at":
+                now_ts(),
+        },
+    )
+
+
+# ============================================================
+# ACCESS LINK
+# ============================================================
+
+async def make_access_link(
+    plan_key: str,
+):
 
     plan = PLANS[
         plan_key
     ]
 
+    channel_id = plan.get(
+        "channel_id"
+    )
+
+    if channel_id:
+
+        try:
+
+            invite = (
+                await bot.create_chat_invite_link(
+                    chat_id=channel_id,
+                    member_limit=1,
+                )
+            )
+
+            return invite.invite_link
+
+        except Exception as e:
+
+            print(
+                "Invite creation failed:",
+                repr(e),
+            )
+
+    static_link = plan.get(
+        "access_link"
+    )
+
+    if static_link:
+        return static_link
+
+    return None
+
+
+# ============================================================
+# DELIVER ACCESS
+# ============================================================
+
+async def deliver_access(
+    order: dict,
+    payment_id: str,
+):
+
+    subscription = (
+        await create_subscription(
+            order,
+            payment_id,
+        )
+    )
+
+    access_link = await make_access_link(
+        order["plan_key"]
+    )
+
+    if access_link:
+
+        await supabase_request(
+            "PATCH",
+            "subscriptions",
+            params={
+                "id":
+                    f"eq.{subscription['id']}",
+            },
+            json_data={
+                "access_link":
+                    access_link,
+            },
+        )
+
+    plan = PLANS[
+        order["plan_key"]
+    ]
+
+    duration_days = int(
+        plan.get(
+            "duration_days",
+            0,
+        )
+    )
+
+    if duration_days <= 0:
+
+        expiry_text = (
+            "♾️ Lifetime Access"
+        )
+
+    else:
+
+        expiry = subscription.get(
+            "expires_at"
+        )
+
+        expiry_text = (
+            f"⏳ Expires: "
+            f"<b>{format_ts(expiry)}</b>"
+        )
+
+    if access_link:
+
+        access_text = (
+            "🔗 <b>Your Channel Access:</b>\n"
+            f"{access_link}"
+        )
+
+    else:
+
+        access_text = (
+            "⚠️ Access link configure nahi hai.\n"
+            f"Support: @{SUPPORT_USERNAME}"
+        )
+
+    await bot.send_message(
+
+        order["user_id"],
+
+        "🎉 <b>PAYMENT CONFIRMED!</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+
+        f"📦 Plan: "
+        f"<b>{plan['name']}</b>\n"
+
+        f"💰 Paid: "
+        f"<b>₹{plan['price']}</b>\n\n"
+
+        f"{expiry_text}\n\n"
+
+        f"🧾 Transaction:\n"
+        f"<code>{order.get('txn_id')}</code>\n\n"
+
+        f"{access_text}\n\n"
+
+        "⚠️ Access link share mat karein.",
+    )
+
+    await update_order(
+        order["reference_id"],
+        {
+            "status":
+                "paid",
+
+            "payment_id":
+                payment_id,
+
+            "paid_at":
+                now_ts(),
+
+            "access_sent":
+                True,
+        },
+    )
+
+
+# ============================================================
+# PAYU CALLBACK HASH
+# ============================================================
+#
+# PayU standard callback verification.
+#
+# If PayU callback contains hash, verify it.
+#
+# ============================================================
+
+def verify_payu_callback_hash(
+    data: dict,
+) -> bool:
+
+    received_hash = str(
+        data.get(
+            "hash",
+            "",
+        )
+    ).strip()
+
+    if not received_hash:
+        return False
+
+    status = str(
+        data.get(
+            "status",
+            "",
+        )
+    )
+
+    email = str(
+        data.get(
+            "email",
+            "",
+        )
+    )
+
+    firstname = str(
+        data.get(
+            "firstname",
+            "",
+        )
+    )
+
+    productinfo = str(
+        data.get(
+            "productinfo",
+            "",
+        )
+    )
+
+    amount = str(
+        data.get(
+            "amount",
+            "",
+        )
+    )
+
+    txnid = str(
+        data.get(
+            "txnid",
+            "",
+        )
+    )
+
+    key = str(
+        data.get(
+            "key",
+            PAYU_KEY,
+        )
+    )
+
+    udf1 = str(
+        data.get(
+            "udf1",
+            "",
+        )
+    )
+
+    udf2 = str(
+        data.get(
+            "udf2",
+            "",
+        )
+    )
+
+    udf3 = str(
+        data.get(
+            "udf3",
+            "",
+        )
+    )
+
+    udf4 = str(
+        data.get(
+            "udf4",
+            "",
+        )
+    )
+
+    udf5 = str(
+        data.get(
+            "udf5",
+            "",
+        )
+    )
+
+    additional = str(
+        data.get(
+            "additionalCharges",
+            "",
+        )
+    )
+
+    salt = PAYU_SECRET
+
+    if additional:
+
+        raw = (
+            f"{additional}|"
+            f"{salt}|"
+            f"{status}||||||"
+            f"{udf5}|{udf4}|{udf3}|"
+            f"{udf2}|{udf1}|"
+            f"{email}|{firstname}|"
+            f"{productinfo}|{amount}|"
+            f"{txnid}|{key}"
+        )
+
+    else:
+
+        raw = (
+            f"{salt}|"
+            f"{status}||||||"
+            f"{udf5}|{udf4}|{udf3}|"
+            f"{udf2}|{udf1}|"
+            f"{email}|{firstname}|"
+            f"{productinfo}|{amount}|"
+            f"{txnid}|{key}"
+        )
+
+    calculated = hashlib.sha512(
+        raw.encode("utf-8")
+    ).hexdigest()
+
+    return secrets.compare_digest(
+        calculated.lower(),
+        received_hash.lower(),
+    )
+
+
+# ============================================================
+# COMPLETE PAYMENT
+# ============================================================
+
+async def process_successful_payment(
+    data: dict,
+):
+
+    txn_id = (
+        data.get("txnid")
+        or data.get("txnId")
+        or data.get("transactionId")
+    )
+
+    if not txn_id:
+        return False
+
+    order = await get_order_by_txn(
+        str(txn_id)
+    )
+
+    if not order:
+        print(
+            "No order found for txn:",
+            txn_id,
+        )
+        return False
+
+    if order.get("status") == "paid":
+        return True
+
+    # Amount validation.
+
+    received_amount = (
+        data.get("amount")
+        or data.get("amt")
+    )
+
+    if received_amount:
+
+        try:
+
+            expected = (
+                float(
+                    order[
+                        "amount_paise"
+                    ]
+                ) / 100
+            )
+
+            received = float(
+                received_amount
+            )
+
+            if abs(
+                expected - received
+            ) > 0.01:
+
+                print(
+                    "AMOUNT MISMATCH:",
+                    expected,
+                    received,
+                )
+
+                return False
+
+        except Exception:
+
+            return False
+
+    payment_id = (
+        data.get("mihpayid")
+        or data.get("paymentId")
+        or data.get("bank_ref_num")
+        or str(txn_id)
+    )
+
+    event_id = (
+        f"paid:"
+        f"{txn_id}:"
+        f"{payment_id}"
+    )
+
+    if await event_processed(
+        event_id
+    ):
+        return True
+
+    await deliver_access(
+        order,
+        str(payment_id),
+    )
+
+    await save_event(
+        event_id
+    )
+
+    return True
+
+
+# ============================================================
+# CREATE PAYMENT FOR PLAN
+# ============================================================
+
+async def create_plan_payment(
+    user_id: int,
+    plan_key: str,
+):
+
+    plan = PLANS[
+        plan_key
+    ]
+
+    amount = str(
+        plan["price"]
+    )
+
+    checkout_url, txn_id, result = (
+        await create_payment(
+            user_id=user_id,
+            amount=amount,
+            plan_key=plan_key,
+        )
+    )
+
+    if not checkout_url:
+
+        raise RuntimeError(
+            json.dumps(
+                result,
+                ensure_ascii=False,
+                default=str,
+            )[:2000]
+        )
 
     reference_id = (
         "ORD_"
         + secrets.token_hex(12)
     )
 
-
-    # PayU invoice number should be unique/alphanumeric.
-
-    invoice_number = (
-        "INV"
-        + str(int(time.time()))
-        + secrets.token_hex(4).upper()
-    )
-
-
-    firstname = (
-        firstname
-        or "Customer"
-    )[:100]
-
-
-    email = (
-        f"telegram"
-        f"{user_id}"
-        f"@example.com"
-    )
-
-
-    phone = "9999999999"
-
-
-    expiry_string = (
-        payu_expiry_datetime()
-    )
-
-
-    # Convert expiry to unix for SQLite.
-
-    try:
-
-        expiry_dt = datetime.strptime(
-            expiry_string,
-            "%Y-%m-%d %H:%M:%S",
-        )
-
-        expiry_at = int(
-            expiry_dt.timestamp()
-        )
-
-    except Exception:
-
-        expiry_at = int(
-            time.time()
-            + PAYMENT_LINK_EXPIRY_MINUTES * 60
-        )
-
-
-    # --------------------------------------------------------
-    # SAVE ORDER BEFORE API CALL
-    # --------------------------------------------------------
-
-    save_order(
+    await create_order(
         reference_id=reference_id,
-
         user_id=user_id,
-
         plan_key=plan_key,
-
         amount_paise=(
             plan["price"] * 100
         ),
+        txn_id=txn_id,
     )
-
-
-    # --------------------------------------------------------
-    # PAYU SUCCESS / FAILURE URL
-    # --------------------------------------------------------
-
-    success_url = (
-        f"{PUBLIC_BASE_URL}"
-        "/payu/success"
-    )
-
-
-    failure_url = (
-        f"{PUBLIC_BASE_URL}"
-        "/payu/failure"
-    )
-
-
-    # --------------------------------------------------------
-    # PAYMENT LINK PAYLOAD
-    # --------------------------------------------------------
-    #
-    # PayU current Payment Links API.
-    #
-    # IMPORTANT:
-    # successURL / failureURL
-    # NOT surl / furl
-    #
-    # --------------------------------------------------------
-
-    payload = {
-
-        "isAmountFilledByCustomer": False,
-
-        "subAmount": plan["price"],
-
-        "description": plan[
-            "description"
-        ],
-
-        "currency": "INR",
-
-        "source": "API",
-
-        "invoiceNumber":
-            invoice_number,
-
-        "isPartialPaymentAllowed":
-            False,
-
-        "maxPaymentsAllowed": 1,
-
-        "expiryDate":
-            expiry_string,
-
-        "customer": {
-
-            "name":
-                firstname,
-
-            "phone":
-                phone,
-
-            "email":
-                email,
-        },
-
-        "udf": {
-
-            "udf1":
-                str(user_id),
-
-            "udf2":
-                plan_key,
-
-            "udf3":
-                reference_id,
-
-            "udf4":
-                "",
-
-            "udf5":
-                "",
-        },
-
-        "viaEmail": False,
-
-        "viaSms": False,
-
-        "successURL":
-            success_url,
-
-        "failureURL":
-            failure_url,
-
-        "notes":
-            f"Telegram user {user_id} | "
-            f"Plan {plan_key} | "
-            f"Reference {reference_id}",
-    }
-
-
-    print()
-    print("=" * 80)
-    print("PAYU CREATE PAYMENT LINK")
-    print("=" * 80)
-    print(
-        json.dumps(
-            payload,
-            indent=2,
-            ensure_ascii=False,
-        )
-    )
-    print("=" * 80)
-
-
-    try:
-
-        result = await payu_request(
-            "POST",
-
-            PAYU_PAYMENT_LINK_URL,
-
-            json_data=payload,
-        )
-
-    except Exception as e:
-
-        mark_failed(
-            reference_id
-        )
-
-        raise RuntimeError(
-            f"PayU payment link request failed: {e}"
-        )
-
-
-    print()
-    print("PAYU CREATE RESPONSE:")
-    print(
-        json.dumps(
-            result,
-            indent=2,
-            ensure_ascii=False,
-            default=str,
-        )
-    )
-
-
-    # --------------------------------------------------------
-    # API STATUS
-    # --------------------------------------------------------
-
-    api_status = result.get(
-        "status"
-    )
-
-
-    if (
-        api_status not in (
-            0,
-            "0",
-            None,
-        )
-    ):
-
-        mark_failed(
-            reference_id
-        )
-
-        message = (
-            result.get(
-                "message"
-            )
-            or result.get(
-                "errorCode"
-            )
-            or "Unknown PayU error"
-        )
-
-
-        raise RuntimeError(
-            f"PayU rejected payment link: "
-            f"{message}"
-        )
-
-
-    payment_result = result.get(
-        "result"
-    )
-
-
-    if not isinstance(
-        payment_result,
-        dict,
-    ):
-
-        payment_result = {}
-
-
-    payment_link = (
-        payment_result.get(
-            "paymentLink"
-        )
-        or payment_result.get(
-            "payment_link"
-        )
-    )
-
-
-    returned_invoice = (
-        payment_result.get(
-            "invoiceNumber"
-        )
-        or invoice_number
-    )
-
-
-    if not payment_link:
-
-        mark_failed(
-            reference_id
-        )
-
-        raise RuntimeError(
-            "PayU did not return paymentLink."
-        )
-
-
-    # --------------------------------------------------------
-    # SAVE GENERATED LINK
-    # --------------------------------------------------------
-
-    update_payment_link(
-        reference_id=
-            reference_id,
-
-        invoice_number=
-            returned_invoice,
-
-        payment_link=
-            payment_link,
-
-        expiry_at=
-            expiry_at,
-    )
-
 
     return {
         "reference_id":
             reference_id,
 
-        "invoice_number":
-            returned_invoice,
+        "txn_id":
+            txn_id,
 
-        "payment_link":
-            payment_link,
-
-        "expiry":
-            expiry_string,
+        "checkout_url":
+            checkout_url,
 
         "amount":
             plan["price"],
@@ -1503,666 +1660,47 @@ async def create_payu_payment_link(
 
 
 # ============================================================
-# PAYU TRANSACTION DETAILS
+# KEYBOARDS
 # ============================================================
 
-async def get_payu_transactions(
-    invoice_number: str,
-    created_at: int,
-):
-
-    created_date = datetime.fromtimestamp(
-        created_at
-    ).strftime(
-        "%Y-%m-%d"
-    )
-
-
-    today = india_now().strftime(
-        "%Y-%m-%d"
-    )
-
-
-    url = (
-        f"{PAYU_TRANSACTION_URL.rstrip('/')}"
-        f"/{invoice_number}/txns"
-    )
-
-
-    params = {
-
-        "pageSize": 50,
-
-        "dateFrom":
-            created_date,
-
-        "dateTo":
-            today,
-    }
-
-
-    result = await payu_request(
-        "GET",
-
-        url,
-
-        params=params,
-    )
-
-
-    return result
-
-
-# ============================================================
-# EXTRACT TRANSACTION
-# ============================================================
-
-def extract_transaction(
-    result,
-    order,
-):
-
-    if not isinstance(
-        result,
-        dict,
-    ):
-        return None
-
-
-    api_result = result.get(
-        "result"
-    )
-
-
-    if not isinstance(
-        api_result,
-        dict,
-    ):
-
-        return None
-
-
-    transactions = api_result.get(
-        "data"
-    )
-
-
-    if not isinstance(
-        transactions,
-        list,
-    ):
-
-        return None
-
-
-    if not transactions:
-
-        return None
-
-
-    # Prefer success transaction.
-
-    success_transactions = [
-
-        tx
-        for tx in transactions
-
-        if str(
-            tx.get(
-                "status",
-                "",
-            )
-        ).lower()
-        == "success"
-    ]
-
-
-    candidates = (
-        success_transactions
-        or transactions
-    )
-
-
-    # --------------------------------------------------------
-    # Find matching amount
-    # --------------------------------------------------------
-
-    expected_amount = (
-        order["amount_paise"]
-        / 100
-    )
-
-
-    for tx in candidates:
-
-        amount = (
-
-            tx.get(
-                "settledAmount"
-            )
-
-            or tx.get(
-                "amount"
-            )
-
-            or tx.get(
-                "amt"
-            )
-        )
-
-
-        if amount is None:
-
-            return tx
-
-
-        try:
-
-            if abs(
-                float(amount)
-                - expected_amount
-            ) <= 0.01:
-
-                return tx
-
-        except Exception:
-
-            continue
-
-
-    return candidates[0]
-
-
-# ============================================================
-# VERIFY ONE ORDER
-# ============================================================
-
-async def verify_order(
-    order: dict,
-):
-
-    if not order:
-
-        return False
-
-
-    if order["status"] == "paid":
-
-        return True
-
-
-    if not order.get(
-        "invoice_number"
-    ):
-
-        return False
-
-
-    try:
-
-        result = await get_payu_transactions(
-            order[
-                "invoice_number"
+def home_keyboard():
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+
+            [
+                InlineKeyboardButton(
+                    text="⚡ Gold Dark",
+                    callback_data="plan:gold",
+                ),
+
+                InlineKeyboardButton(
+                    text="⚡ Silver Dark",
+                    callback_data="plan:silver",
+                ),
             ],
 
-            order[
-                "created_at"
-            ],
-        )
+            [
+                InlineKeyboardButton(
+                    text="⚡ Bronze Dark",
+                    callback_data="plan:bronze",
+                ),
 
-
-        print()
-        print(
-            "PAYU TRANSACTION CHECK:",
-            order["invoice_number"],
-        )
-        print(
-            json.dumps(
-                result,
-                indent=2,
-                ensure_ascii=False,
-                default=str,
-            )
-        )
-
-
-    except Exception as e:
-
-        print(
-            "Transaction verification error:",
-            repr(e),
-        )
-
-        return False
-
-
-    transaction = extract_transaction(
-        result,
-        order,
-    )
-
-
-    if not transaction:
-
-        mark_pending(
-            order[
-                "reference_id"
-            ]
-        )
-
-        return False
-
-
-    status = str(
-        transaction.get(
-            "status",
-            "",
-        )
-    ).lower().strip()
-
-
-    print(
-        "PAYU PAYMENT STATUS:",
-        status,
-    )
-
-
-    # ========================================================
-    # SUCCESS
-    # ========================================================
-
-    if status == "success":
-
-        # ----------------------------------------------------
-        # Amount validation
-        # ----------------------------------------------------
-
-        expected_amount = (
-            order[
-                "amount_paise"
-            ]
-            / 100
-        )
-
-
-        received_amount = (
-
-            transaction.get(
-                "settledAmount"
-            )
-
-            or transaction.get(
-                "amount"
-            )
-
-            or transaction.get(
-                "amt"
-            )
-        )
-
-
-        if received_amount is not None:
-
-            try:
-
-                if abs(
-                    float(received_amount)
-                    - expected_amount
-                ) > 0.01:
-
-                    print(
-                        "AMOUNT MISMATCH:",
-                        received_amount,
-                        expected_amount,
-                    )
-
-                    return False
-
-            except Exception:
-
-                return False
-
-
-        # ----------------------------------------------------
-        # Payment ID
-        # ----------------------------------------------------
-
-        payment_id = (
-
-            transaction.get(
-                "transactionId"
-            )
-
-            or transaction.get(
-                "paymentId"
-            )
-
-            or str(
-                transaction.get(
-                    "transaction_id",
-                    "",
-                )
-            )
-
-            or order[
-                "invoice_number"
-            ]
-        )
-
-
-        # ----------------------------------------------------
-        # Mark paid
-        # ----------------------------------------------------
-
-        mark_paid(
-            order[
-                "reference_id"
+                InlineKeyboardButton(
+                    text="⚡ Iron Dark",
+                    callback_data="plan:iron",
+                ),
             ],
 
-            str(
-                payment_id
-            ),
-        )
-
-
-        updated_order = get_order(
-            order[
-                "reference_id"
-            ]
-        )
-
-
-        if updated_order:
-
-            try:
-
-                await deliver_access(
-                    updated_order
-                )
-
-            except Exception as e:
-
-                print(
-                    "Access delivery error:",
-                    repr(e),
-                )
-
-
-        return True
-
-
-    # ========================================================
-    # FAILED
-    # ========================================================
-
-    if status in (
-        "failed",
-        "failure",
-        "cancelled",
-        "canceled",
-    ):
-
-        mark_failed(
-            order[
-                "reference_id"
-            ]
-        )
-
-        return False
-
-
-    # ========================================================
-    # EXPIRED
-    # ========================================================
-
-    if status in (
-        "expired",
-    ):
-
-        mark_expired(
-            order[
-                "reference_id"
-            ]
-        )
-
-        return False
-
-
-    # ========================================================
-    # PENDING / OTHER
-    # ========================================================
-
-    mark_pending(
-        order[
-            "reference_id"
+            [
+                InlineKeyboardButton(
+                    text="📋 My Plan",
+                    callback_data="myplan",
+                ),
+            ],
         ]
     )
 
-
-    return False
-
-
-# ============================================================
-# PAYMENT WATCHER
-# ============================================================
-
-async def payment_watcher():
-
-    print(
-        "Payment watcher started."
-    )
-
-
-    while True:
-
-        try:
-
-            orders = get_pending_orders()
-
-
-            for order in orders:
-
-                try:
-
-                    # Do not verify too aggressively.
-
-                    last_checked = (
-                        order.get(
-                            "last_checked_at"
-                        )
-                        or 0
-                    )
-
-
-                    if (
-                        time.time()
-                        - last_checked
-                        < PAYMENT_CHECK_INTERVAL
-                    ):
-
-                        continue
-
-
-                    # If local expiry is reached,
-                    # check once more and then expire.
-
-                    expiry_at = (
-                        order.get(
-                            "expiry_at"
-                        )
-                        or 0
-                    )
-
-
-                    if (
-                        expiry_at
-                        and time.time()
-                        > expiry_at
-                    ):
-
-                        # One final PayU verification.
-
-                        success = (
-                            await verify_order(
-                                order
-                            )
-                        )
-
-
-                        if not success:
-
-                            latest = get_order(
-                                order[
-                                    "reference_id"
-                                ]
-                            )
-
-
-                            if latest and latest[
-                                "status"
-                            ] != "paid":
-
-                                mark_expired(
-                                    order[
-                                        "reference_id"
-                                    ]
-                                )
-
-                        continue
-
-
-                    await verify_order(
-                        order
-                    )
-
-
-                except Exception as e:
-
-                    print(
-                        "Watcher order error:",
-                        repr(e),
-                    )
-
-
-                await asyncio.sleep(
-                    0.5
-                )
-
-
-        except asyncio.CancelledError:
-
-            print(
-                "Payment watcher stopped."
-            )
-
-            raise
-
-
-        except Exception as e:
-
-            print(
-                "Payment watcher loop error:",
-                repr(e),
-            )
-
-
-        await asyncio.sleep(
-            PAYMENT_CHECK_INTERVAL
-        )
-
-
-# ============================================================
-# SUPPORT URL
-# ============================================================
-
-def support_url():
-
-    username = (
-        SUPPORT_USERNAME
-        .lstrip("@")
-        .strip()
-    )
-
-
-    if not username:
-
-        return None
-
-
-    return (
-        "https://t.me/"
-        + username
-    )
-
-
-# ============================================================
-# MAIN KEYBOARD
-# ============================================================
-
-def main_keyboard():
-
-    buttons = [
-
-        [
-            InlineKeyboardButton(
-                text="⚡ Gold Dark (Channel 1)",
-                callback_data="plan:gold",
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                text="⚡ Silver Dark (Channel 2)",
-                callback_data="plan:silver",
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                text="⚡ Bronze Dark (Channel 3)",
-                callback_data="plan:bronze",
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                text="⚡ Iron Dark (Channel 4)",
-                callback_data="plan:iron",
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                text="📋 My Plan",
-                callback_data="myplan",
-            )
-        ],
-    ]
-
-
-    support = support_url()
-
-
-    if support:
-
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text="📞 Support",
-                    url=support,
-                )
-            ]
-        )
-
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=buttons
-    )
-
-
-# ============================================================
-# PLAN KEYBOARD
-# ============================================================
 
 def plan_keyboard(
     plan_key: str,
@@ -2172,7 +1710,6 @@ def plan_keyboard(
         plan_key
     ]
 
-
     return InlineKeyboardMarkup(
         inline_keyboard=[
 
@@ -2181,32 +1718,26 @@ def plan_keyboard(
                     text=(
                         f"💳 Pay ₹"
                         f"{plan['price']}"
-                        f" with PayU"
                     ),
-
                     callback_data=(
                         f"buy:{plan_key}"
                     ),
-                )
+                ),
             ],
 
             [
                 InlineKeyboardButton(
                     text="↩️ Back",
                     callback_data="home",
-                )
+                ),
             ],
         ]
     )
 
 
-# ============================================================
-# PAYMENT LINK KEYBOARD
-# ============================================================
-
-def payment_link_keyboard(
-    reference_id: str,
-    payment_link: str,
+def payment_keyboard(
+    checkout_url: str,
+    txn_id: str,
 ):
 
     return InlineKeyboardMarkup(
@@ -2214,33 +1745,25 @@ def payment_link_keyboard(
 
             [
                 InlineKeyboardButton(
-                    text="💳 Open PayU Payment",
-                    url=payment_link,
-                )
+                    text="💳 Pay Now",
+                    url=checkout_url,
+                ),
             ],
 
             [
                 InlineKeyboardButton(
                     text="🔄 Verify Payment",
                     callback_data=(
-                        "verify:"
-                        + reference_id
+                        f"verify:{txn_id}"
                     ),
-                )
+                ),
             ],
 
             [
                 InlineKeyboardButton(
                     text="📋 My Plan",
                     callback_data="myplan",
-                )
-            ],
-
-            [
-                InlineKeyboardButton(
-                    text="↩️ Back",
-                    callback_data="home",
-                )
+                ),
             ],
         ]
     )
@@ -2255,48 +1778,33 @@ async def send_home(
 ):
 
     support = (
-        SUPPORT_USERNAME
+        f"@{SUPPORT_USERNAME}"
         if SUPPORT_USERNAME
-        else "Contact admin"
+        else "Admin"
     )
 
-
     text = (
-
         "👋 <b>Welcome to DARK STORE!</b>\n"
-
         "━━━━━━━━━━━━━━━━━━\n\n"
 
-        "<blockquote>"
+        "🔥 <b>Choose your channel plan:</b>\n\n"
 
-        "<b>Available Channels:</b>\n"
+        "⚡ Gold Dark\n"
+        "⚡ Silver Dark\n"
+        "⚡ Bronze Dark\n"
+        "⚡ Iron Dark\n\n"
 
-        "⚡ Gold Dark (Channel 1)\n"
-
-        "⚡ Silver Dark (Channel 2)\n"
-
-        "⚡ Bronze Dark (Channel 3)\n"
-
-        "⚡ Iron Dark (Channel 4)"
-
-        "</blockquote>\n\n"
-
-        "💳 Secure payment powered by PayU\n"
-
-        "🔗 Pay using a secure Payment Link\n\n"
-
-        "━━━━━━━━━━━━━━━━━━\n"
+        "💳 Secure PayU payment\n"
+        "🔐 Automatic payment confirmation\n"
+        "🔗 Automatic channel access\n\n"
 
         f"💬 Support: {support}"
     )
 
-
     await bot.send_message(
         chat_id,
-
         text,
-
-        reply_markup=main_keyboard(),
+        reply_markup=home_keyboard(),
     )
 
 
@@ -2310,6 +1818,16 @@ async def send_home(
 async def start_handler(
     message: Message,
 ):
+
+    try:
+        await save_user(
+            message.from_user
+        )
+    except Exception as e:
+        print(
+            "Save user error:",
+            repr(e),
+        )
 
     await send_home(
         message.chat.id
@@ -2329,14 +1847,13 @@ async def home_callback(
 
     await callback.answer()
 
-
     await send_home(
-        callback.message.chat.id
+        callback.from_user.id
     )
 
 
 # ============================================================
-# PLAN CALLBACK
+# PLAN
 # ============================================================
 
 @router.callback_query(
@@ -2348,12 +1865,10 @@ async def plan_callback(
 
     await callback.answer()
 
-
     plan_key = callback.data.split(
         ":",
         1,
     )[1]
-
 
     if plan_key not in PLANS:
 
@@ -2363,35 +1878,47 @@ async def plan_callback(
 
         return
 
-
     plan = PLANS[
         plan_key
     ]
 
+    duration = int(
+        plan[
+            "duration_days"
+        ]
+    )
+
+    if duration <= 0:
+
+        duration_text = (
+            "♾️ Lifetime"
+        )
+
+    else:
+
+        duration_text = (
+            f"⏳ {duration} days"
+        )
 
     text = (
-
         f"<b>{plan['name']}</b>\n"
-
         "━━━━━━━━━━━━━━━━━━\n\n"
 
         f"💰 Price: "
-        f"<b>₹{plan['price']}</b>\n\n"
+        f"<b>₹{plan['price']}</b>\n"
 
-        "🔐 Lifetime Access\n"
+        f"📅 Access: "
+        f"<b>{duration_text}</b>\n\n"
 
-        "💳 Secure PayU Payment Link\n\n"
+        "🔐 Secure PayU checkout\n"
+        "⚡ Automatic verification\n"
+        "🔗 Channel access after payment\n\n"
 
-        f"⏱️ Payment link validity: "
-        f"<b>{PAYMENT_LINK_EXPIRY_MINUTES} minutes</b>\n\n"
-
-        "Click below to continue."
+        "👇 Continue karne ke liye Pay button dabao."
     )
-
 
     await callback.message.answer(
         text,
-
         reply_markup=plan_keyboard(
             plan_key
         ),
@@ -2410,15 +1937,13 @@ async def buy_callback(
 ):
 
     await callback.answer(
-        "Creating PayU payment link..."
+        "PayU payment create ho raha hai..."
     )
-
 
     plan_key = callback.data.split(
         ":",
         1,
     )[1]
-
 
     if plan_key not in PLANS:
 
@@ -2428,66 +1953,42 @@ async def buy_callback(
 
         return
 
-
     try:
 
         result = (
-            await create_payu_payment_link(
-
+            await create_plan_payment(
                 user_id=
                     callback.from_user.id,
 
                 plan_key=
                     plan_key,
-
-                firstname=(
-                    callback.from_user.first_name
-                    or "Customer"
-                ),
             )
         )
-
 
     except Exception as e:
 
         eid = error_id()
 
-
-        log_error(
-            f"PAYMENT LINK ERROR [{eid}]",
+        print(
+            f"[{eid}] PAYMENT ERROR:",
             repr(e),
         )
 
-
         await callback.message.answer(
-
-            "❌ <b>Payment Link generate nahi ho paya.</b>\n\n"
-
-            "PayU se payment link create karte waqt "
-            "problem aayi.\n\n"
-
-            f"🔎 Reason:\n"
+            "❌ <b>Payment create nahi ho paya.</b>\n\n"
+            f"Reason:\n"
             f"<code>{str(e)[:1500]}</code>\n\n"
-
-            f"🧾 Error ID: "
-            f"<code>{eid}</code>\n\n"
-
-            "Agar problem baar-baar aa rahi hai "
-            "to ye Error ID support ko bhejein."
+            f"Error ID: <code>{eid}</code>"
         )
 
         return
-
 
     plan = PLANS[
         plan_key
     ]
 
-
     text = (
-
-        "💳 <b>PAYU PAYMENT LINK</b>\n"
-
+        "💳 <b>PAYU PAYMENT</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
 
         f"📦 Plan: "
@@ -2496,185 +1997,27 @@ async def buy_callback(
         f"💰 Amount: "
         f"<b>₹{plan['price']}</b>\n\n"
 
-        "👇 <b>PayU payment page open karne ke "
-        "liye button dabayein.</b>\n\n"
+        "👇 PayU checkout open karne ke liye "
+        "button dabao.\n\n"
 
-        "After payment, bot automatically payment "
-        "status check karega.\n\n"
+        "Payment complete hone ke baad "
+        "bot automatically verify karega.\n\n"
 
-        f"⏱️ Link expiry: "
-        f"<b>{PAYMENT_LINK_EXPIRY_MINUTES} minutes</b>\n\n"
-
-        f"🧾 Invoice:\n"
-        f"<code>{result['invoice_number']}</code>"
+        f"🧾 Transaction:\n"
+        f"<code>{result['txn_id']}</code>"
     )
 
-
     await callback.message.answer(
-
         text,
-
-        reply_markup=payment_link_keyboard(
-            result["reference_id"],
-            result["payment_link"],
+        reply_markup=payment_keyboard(
+            result["checkout_url"],
+            result["txn_id"],
         ),
     )
 
 
 # ============================================================
-# MAKE ACCESS LINK
-# ============================================================
-
-async def make_access_link(
-    plan_key: str,
-):
-
-    plan = PLANS[
-        plan_key
-    ]
-
-
-    # --------------------------------------------------------
-    # ONE-TIME TELEGRAM INVITE
-    # --------------------------------------------------------
-
-    if plan.get(
-        "channel_id"
-    ):
-
-        try:
-
-            invite = (
-                await bot.create_chat_invite_link(
-
-                    chat_id=
-                        plan[
-                            "channel_id"
-                        ],
-
-                    member_limit=1,
-                )
-            )
-
-
-            return invite.invite_link
-
-
-        except Exception as e:
-
-            print(
-                "Telegram invite creation failed:",
-                repr(e),
-            )
-
-
-    # --------------------------------------------------------
-    # STATIC FALLBACK
-    # --------------------------------------------------------
-
-    if plan.get(
-        "access_link"
-    ):
-
-        return plan[
-            "access_link"
-        ]
-
-
-    return None
-
-
-# ============================================================
-# DELIVER ACCESS
-# ============================================================
-
-async def deliver_access(
-    order: dict,
-):
-
-    if order.get(
-        "access_sent"
-    ):
-
-        return True
-
-
-    access_link = (
-        await make_access_link(
-            order[
-                "plan_key"
-            ]
-        )
-    )
-
-
-    if not access_link:
-
-        support = (
-            SUPPORT_USERNAME
-            or "admin"
-        )
-
-
-        await bot.send_message(
-
-            order["user_id"],
-
-            "✅ <b>Payment Confirmed!</b>\n\n"
-
-            "Lekin access link configure nahi hai.\n\n"
-
-            f"📞 Support: {support}",
-        )
-
-
-        return False
-
-
-    plan = PLANS[
-        order[
-            "plan_key"
-        ]
-    ]
-
-
-    await bot.send_message(
-
-        order["user_id"],
-
-        "🎉 <b>Payment Confirmed!</b>\n"
-
-        "━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"📦 Plan: "
-        f"<b>{plan['name']}</b>\n"
-
-        f"💰 Paid: "
-        f"<b>₹{plan['price']}</b>\n\n"
-
-        f"🧾 Invoice:\n"
-        f"<code>{order.get('invoice_number')}</code>\n\n"
-
-        "🔗 <b>Your Access Link:</b>\n"
-
-        f"{access_link}\n\n"
-
-        "⚠️ Link ko kisi ke saath share mat karein."
-    )
-
-
-    mark_access_sent(
-        order[
-            "reference_id"
-        ]
-    )
-
-
-    return True
-
-
-# ============================================================
-# VERIFY CALLBACK
+# VERIFY
 # ============================================================
 
 @router.callback_query(
@@ -2685,157 +2028,197 @@ async def verify_callback(
 ):
 
     await callback.answer(
-        "Checking PayU..."
+        "Payment status check ho raha hai..."
     )
 
-
-    reference_id = callback.data.split(
+    txn_id = callback.data.split(
         ":",
         1,
     )[1]
 
-
-    order = get_order(
-        reference_id
+    order = await get_order_by_txn(
+        txn_id
     )
-
 
     if not order:
 
         await callback.message.answer(
-            "❌ Order not found."
+            "❌ Order nahi mila."
         )
 
         return
 
-
     if (
-        order["user_id"]
+        int(order["user_id"])
         != callback.from_user.id
     ):
 
         await callback.message.answer(
-            "❌ This order does not belong to you."
+            "❌ Ye order aapka nahi hai."
         )
 
         return
 
-
-    if order["status"] == "paid":
+    if order.get("status") == "paid":
 
         await callback.message.answer(
             "✅ <b>Payment already confirmed.</b>\n\n"
-            "Use /myplan for your access."
+            "Use /myplan."
         )
 
         return
 
+    await callback.message.answer(
+        "⏳ Payment verification PayU callback "
+        "ke through complete hogi.\n\n"
+        "Agar payment complete ho chuka hai to "
+        "thodi der wait karein."
+    )
 
-    try:
 
-        success = await verify_order(
-            order
+# ============================================================
+# MY PLAN
+# ============================================================
+
+async def send_my_plan(
+    message: Message,
+):
+
+    subscription = (
+        await get_latest_paid_subscription(
+            message.from_user.id
+        )
+    )
+
+    if not subscription:
+
+        await message.answer(
+            "📋 <b>My Plan</b>\n\n"
+            "❌ Aapka koi active plan nahi hai.",
+            reply_markup=home_keyboard(),
         )
 
+        return
 
-        updated = get_order(
-            reference_id
-        )
+    plan = PLANS.get(
+        subscription[
+            "plan_key"
+        ],
+        {},
+    )
 
+    expires_at = subscription.get(
+        "expires_at"
+    )
+
+    if expires_at:
+
+        try:
+
+            expires_int = int(
+                expires_at
+            )
+
+        except Exception:
+
+            expires_int = 0
 
         if (
-            success
-            or (
-                updated
-                and updated["status"]
-                == "paid"
-            )
+            expires_int
+            and expires_int <= now_ts()
         ):
 
-            await callback.message.answer(
+            await update_subscription(
+                subscription["id"],
+                {
+                    "status":
+                        "expired",
+                },
+            )
 
-                "🎉 <b>Payment Confirmed!</b>\n\n"
-
-                "Aapka payment successfully verify "
-                "ho gaya hai.\n\n"
-
-                "🔗 Access link aapko send kar diya gaya hai.\n\n"
-
-                "Use /myplan anytime."
+            await message.answer(
+                "⌛ <b>Your plan has expired.</b>\n\n"
+                "Naya plan purchase karne ke liye "
+                "neeche button use karein.",
+                reply_markup=home_keyboard(),
             )
 
             return
 
+        expiry_text = (
+            f"⏳ Expires: "
+            f"<b>{format_ts(expires_int)}</b>"
+        )
 
-        if updated:
+    else:
 
-            status = updated[
-                "status"
+        expiry_text = (
+            "♾️ <b>Lifetime Access</b>"
+        )
+
+    access_link = (
+        subscription.get(
+            "access_link"
+        )
+    )
+
+    buttons = []
+
+    if access_link:
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="🔗 My Channel Link",
+                    url=access_link,
+                )
             ]
+        )
 
-        else:
-
-            status = "pending"
-
-
-        if status == "failed":
-
-            await callback.message.answer(
-                "❌ <b>Payment Failed.</b>\n\n"
-                "PayU transaction failed."
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                text="🛒 Buy Another Plan",
+                callback_data="home",
             )
+        ]
+    )
 
-            return
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=buttons
+    )
 
+    text = (
+        "📋 <b>MY PLAN</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
 
-        if status == "expired":
+        f"📦 Plan: "
+        f"<b>{plan.get('name', subscription['plan_key'])}</b>\n"
 
-            await callback.message.answer(
-                "⌛ <b>Payment Link Expired.</b>\n\n"
-                "Please create a new payment link."
-            )
+        "📌 Status: <b>ACTIVE</b>\n"
 
-            return
+        f"{expiry_text}\n\n"
 
+        "🔐 Your access is active."
+    )
 
-        await callback.message.answer(
-
-            "⏳ <b>Payment abhi confirm nahi hua.</b>\n\n"
-
-            "Agar payment abhi-abhi kiya hai to "
-            "20–30 seconds wait karke dobara "
-            "<b>Verify Payment</b> dabayein.\n\n"
-
-            f"PayU status: "
-            f"<code>{status}</code>"
-        )
-
-
-    except Exception as e:
-
-        eid = error_id()
+    await message.answer(
+        text,
+        reply_markup=keyboard,
+    )
 
 
-        log_error(
-            f"MANUAL VERIFICATION ERROR [{eid}]",
-            repr(e),
-        )
+@router.message(
+    Command("myplan")
+)
+async def myplan_command(
+    message: Message,
+):
 
+    await send_my_plan(
+        message
+    )
 
-        await callback.message.answer(
-
-            "❌ <b>Payment verification failed.</b>\n\n"
-
-            f"Error ID: "
-            f"<code>{eid}</code>\n\n"
-
-            "Thodi der baad dobara try karein."
-        )
-
-
-# ============================================================
-# MY PLAN CALLBACK
-# ============================================================
 
 @router.callback_query(
     F.data == "myplan"
@@ -2852,331 +2235,220 @@ async def myplan_callback(
 
 
 # ============================================================
-# MY PLAN COMMAND
+# BROADCAST
 # ============================================================
 
 @router.message(
-    Command("myplan")
+    Command("broadcast")
 )
-async def myplan_message(
+async def broadcast_command(
     message: Message,
 ):
-
-    await send_my_plan(
-        message
-    )
-
-
-# ============================================================
-# SEND MY PLAN
-# ============================================================
-
-async def send_my_plan(
-    message: Message,
-):
-
-    order = get_latest_order(
-        message.from_user.id
-    )
-
-
-    if not order:
-
-        await message.answer(
-
-            "📋 <b>My Plan</b>\n\n"
-
-            "Aapka koi order nahi mila.",
-
-            reply_markup=main_keyboard(),
-        )
-
-        return
-
-
-    plan = PLANS.get(
-        order["plan_key"],
-        {},
-    )
-
-
-    status = str(
-        order[
-            "status"
-        ]
-    ).upper()
-
-
-    # ========================================================
-    # PAID
-    # ========================================================
-
-    if order[
-        "status"
-    ] == "paid":
-
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-
-                [
-                    InlineKeyboardButton(
-                        text="🔗 Send Access Link",
-
-                        callback_data=(
-                            "access:"
-                            + order[
-                                "reference_id"
-                            ]
-                        ),
-                    )
-                ],
-
-                [
-                    InlineKeyboardButton(
-                        text="↩️ Back",
-
-                        callback_data="home",
-                    )
-                ],
-            ]
-        )
-
-
-        text = (
-
-            "📋 <b>My Plan</b>\n"
-
-            "━━━━━━━━━━━━━━━━━━\n\n"
-
-            f"📦 Plan: "
-            f"<b>{plan.get('name', order['plan_key'])}</b>\n"
-
-            f"💰 Amount: "
-            f"<b>₹{order['amount_paise'] // 100}</b>\n"
-
-            "📌 Status: <b>PAID</b>\n"
-
-            f"🧾 Invoice: "
-            f"<code>{order.get('invoice_number')}</code>\n"
-
-            f"💳 Payment ID: "
-            f"<code>{order.get('payment_id') or '-'}</code>\n\n"
-
-            "Your lifetime access is active."
-        )
-
-
-        await message.answer(
-            text,
-            reply_markup=keyboard,
-        )
-
-        return
-
-
-    # ========================================================
-    # UNPAID
-    # ========================================================
-
-    keyboard_rows = []
-
-
-    if order.get(
-        "payment_link"
-    ):
-
-        keyboard_rows.append(
-            [
-                InlineKeyboardButton(
-                    text="💳 Open PayU Payment",
-
-                    url=order[
-                        "payment_link"
-                    ],
-                )
-            ]
-        )
-
-
-    if order.get(
-        "invoice_number"
-    ):
-
-        keyboard_rows.append(
-            [
-                InlineKeyboardButton(
-                    text="🔄 Verify Payment",
-
-                    callback_data=(
-                        "verify:"
-                        + order[
-                            "reference_id"
-                        ]
-                    ),
-                )
-            ]
-        )
-
-
-    keyboard_rows.append(
-        [
-            InlineKeyboardButton(
-                text="↩️ Back",
-
-                callback_data="home",
-            )
-        ]
-    )
-
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=keyboard_rows
-    )
-
-
-    text = (
-
-        "📋 <b>My Plan</b>\n"
-
-        "━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"📦 Plan: "
-        f"<b>{plan.get('name', order['plan_key'])}</b>\n"
-
-        f"💰 Amount: "
-        f"<b>₹{order['amount_paise'] // 100}</b>\n"
-
-        f"📌 Status: "
-        f"<b>{status}</b>\n\n"
-
-        "Payment complete karne ke baad "
-        "<b>Verify Payment</b> dabayein."
-    )
-
-
-    await message.answer(
-        text,
-        reply_markup=keyboard,
-    )
-
-
-# ============================================================
-# ACCESS CALLBACK
-# ============================================================
-
-@router.callback_query(
-    F.data.startswith("access:")
-)
-async def access_callback(
-    callback: CallbackQuery,
-):
-
-    await callback.answer(
-        "Checking..."
-    )
-
-
-    reference_id = callback.data.split(
-        ":",
-        1,
-    )[1]
-
-
-    order = get_order(
-        reference_id
-    )
-
-
-    if not order:
-
-        await callback.message.answer(
-            "❌ Order not found."
-        )
-
-        return
-
 
     if (
-        order["user_id"]
-        != callback.from_user.id
+        message.from_user.id
+        not in ADMIN_IDS
     ):
 
-        await callback.message.answer(
-            "❌ This order does not belong to you."
+        await message.answer(
+            "❌ Admin only."
         )
 
         return
 
+    text = (
+        message.text or ""
+    )
 
-    if order["status"] != "paid":
+    parts = text.split(
+        maxsplit=1
+    )
 
-        await callback.message.answer(
-            "❌ Payment confirmed nahi hai."
+    if len(parts) < 2:
+
+        await message.answer(
+            "Usage:\n\n"
+            "<code>/broadcast Your message here</code>"
         )
 
         return
 
+    broadcast_text = parts[1].strip()
 
-    try:
+    users = await supabase_request(
+        "GET",
+        "bot_users",
+        params={
+            "select":
+                "user_id",
 
-        access_link = (
-            await make_access_link(
-                order[
-                    "plan_key"
-                ]
+            "limit":
+                "10000",
+        },
+    )
+
+    if not isinstance(
+        users,
+        list,
+    ):
+
+        await message.answer(
+            "❌ Users fetch failed."
+        )
+
+        return
+
+    sent = 0
+    failed = 0
+
+    status_msg = await message.answer(
+        "📢 Broadcast started..."
+    )
+
+    for user in users:
+
+        user_id = user.get(
+            "user_id"
+        )
+
+        if not user_id:
+            continue
+
+        try:
+
+            await bot.send_message(
+                user_id,
+                broadcast_text,
             )
-        )
 
+            sent += 1
 
-        if not access_link:
+        except Exception as e:
 
-            await callback.message.answer(
+            failed += 1
 
-                "❌ Access link unavailable.\n\n"
-
-                f"Contact {SUPPORT_USERNAME or 'admin'}."
+            print(
+                "Broadcast failed:",
+                user_id,
+                repr(e),
             )
 
-            return
-
-
-        await callback.message.answer(
-
-            "🔗 <b>Your Access Link</b>\n\n"
-
-            f"{access_link}"
+        await asyncio.sleep(
+            0.05
         )
 
-
-    except Exception as e:
-
-        print(
-            "Manual access error:",
-            repr(e),
-        )
-
-
-        await callback.message.answer(
-
-            "❌ Access send nahi ho paya.\n\n"
-
-            f"Contact {SUPPORT_USERNAME or 'admin'}."
-        )
+    await status_msg.edit_text(
+        "📢 <b>Broadcast Complete</b>\n\n"
+        f"✅ Sent: <b>{sent}</b>\n"
+        f"❌ Failed: <b>{failed}</b>"
+    )
 
 
 # ============================================================
-# PAYU SUCCESS REDIRECT
+# STATS
+# ============================================================
+
+@router.message(
+    Command("stats")
+)
+async def stats_command(
+    message: Message,
+):
+
+    if (
+        message.from_user.id
+        not in ADMIN_IDS
+    ):
+
+        await message.answer(
+            "❌ Admin only."
+        )
+
+        return
+
+    users = await supabase_request(
+        "GET",
+        "bot_users",
+        params={
+            "select":
+                "user_id",
+
+            "limit":
+                "10000",
+        },
+    )
+
+    orders = await supabase_request(
+        "GET",
+        "orders",
+        params={
+            "select":
+                "amount_paise,status",
+
+            "limit":
+                "10000",
+        },
+    )
+
+    total_users = (
+        len(users)
+        if isinstance(users, list)
+        else 0
+    )
+
+    total_orders = (
+        len(orders)
+        if isinstance(orders, list)
+        else 0
+    )
+
+    paid_orders = 0
+    revenue = 0
+
+    if isinstance(
+        orders,
+        list,
+    ):
+
+        for order in orders:
+
+            if order.get(
+                "status"
+            ) == "paid":
+
+                paid_orders += 1
+
+                revenue += (
+                    int(
+                        order.get(
+                            "amount_paise",
+                            0,
+                        )
+                    ) / 100
+                )
+
+    await message.answer(
+        "📊 <b>BOT STATS</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+
+        f"👥 Users: <b>{total_users}</b>\n"
+        f"🧾 Orders: <b>{total_orders}</b>\n"
+        f"✅ Paid: <b>{paid_orders}</b>\n"
+        f"💰 Revenue: <b>₹{revenue:.2f}</b>"
+    )
+
+
+# ============================================================
+# PAYU SUCCESS CALLBACK
 # ============================================================
 
 async def payu_success(
     request: web.Request,
 ):
 
+    data = {}
+
     try:
-
-        data = {}
-
 
         if request.method == "POST":
 
@@ -3186,30 +2458,23 @@ async def payu_success(
                 dict(post)
             )
 
-
         if request.query:
 
             data.update(
                 dict(request.query)
             )
 
-
     except Exception as e:
 
-        return web.Response(
-            status=400,
-
-            text=(
-                "Invalid PayU response: "
-                + str(e)
-            ),
+        print(
+            "PayU success parse error:",
+            repr(e),
         )
 
-
     print()
-    print(
-        "PAYU SUCCESS REDIRECT:"
-    )
+    print("=" * 70)
+    print("PAYU SUCCESS CALLBACK")
+    print("=" * 70)
     print(
         json.dumps(
             data,
@@ -3218,46 +2483,55 @@ async def payu_success(
             default=str,
         )
     )
+    print("=" * 70)
 
-
-    invoice = (
-
-        data.get(
-            "invoiceNumber"
-        )
-
-        or data.get(
-            "invoice_number"
-        )
-
-        or data.get(
-            "invoice"
-        )
+    txn_id = (
+        data.get("txnid")
+        or data.get("txnId")
     )
 
+    # If PayU gives a hash, verify it.
 
-    if invoice:
+    if data.get("hash"):
 
-        order = get_order_by_invoice(
-            invoice
+        valid_hash = (
+            verify_payu_callback_hash(
+                data
+            )
         )
 
+        if not valid_hash:
 
-        if order:
+            print(
+                "INVALID PAYU CALLBACK HASH"
+            )
 
-            try:
+            return web.Response(
+                status=403,
+                text="Invalid payment signature.",
+            )
 
-                await verify_order(
-                    order
-                )
+    status = str(
+        data.get(
+            "status",
+            "",
+        )
+    ).lower().strip()
 
-            except Exception as e:
+    if status == "success":
 
-                print(
-                    "Success redirect verification error:",
-                    repr(e),
-                )
+        try:
 
+            await process_successful_payment(
+                data
+            )
+
+        except Exception as e:
+
+            print(
+                "Payment processing error:",
+                repr(e),
+            )
 
     return web.Response(
 
@@ -3270,13 +2544,13 @@ async def payu_success(
 <html>
 <head>
 <meta name="viewport"
-      content="width=device-width, initial-scale=1">
+content="width=device-width,initial-scale=1">
 <title>Payment Successful</title>
 </head>
 <body style="font-family:Arial;text-align:center;padding:40px">
-<h2>✅ Payment received</h2>
-<p>Payment verification is being completed.</p>
-<p>You can return to Telegram.</p>
+<h2>✅ Payment Successful</h2>
+<p>Payment verification complete.</p>
+<p>Please return to Telegram.</p>
 </body>
 </html>
 """,
@@ -3284,17 +2558,16 @@ async def payu_success(
 
 
 # ============================================================
-# PAYU FAILURE REDIRECT
+# PAYU FAILURE
 # ============================================================
 
 async def payu_failure(
     request: web.Request,
 ):
 
+    data = {}
+
     try:
-
-        data = {}
-
 
         if request.method == "POST":
 
@@ -3304,69 +2577,55 @@ async def payu_failure(
                 dict(post)
             )
 
-
         if request.query:
 
             data.update(
                 dict(request.query)
             )
 
-
     except Exception:
+        pass
 
-        data = {}
-
-
-    print()
     print(
-        "PAYU FAILURE REDIRECT:"
-    )
-    print(
+        "PAYU FAILURE:",
         json.dumps(
             data,
-            indent=2,
             ensure_ascii=False,
             default=str,
-        )
+        ),
     )
 
-
-    invoice = (
-
-        data.get(
-            "invoiceNumber"
-        )
-
-        or data.get(
-            "invoice_number"
-        )
-
-        or data.get(
-            "invoice"
-        )
+    txn_id = (
+        data.get("txnid")
+        or data.get("txnId")
     )
 
+    if txn_id:
 
-    if invoice:
+        try:
 
-        order = get_order_by_invoice(
-            invoice
-        )
-
-
-        if (
-            order
-            and order[
-                "status"
-            ] != "paid"
-        ):
-
-            mark_failed(
-                order[
-                    "reference_id"
-                ]
+            order = await get_order_by_txn(
+                str(txn_id)
             )
 
+            if order:
+
+                await update_order(
+                    order[
+                        "reference_id"
+                    ],
+                    {
+                        "status":
+                            "failed",
+                    },
+                )
+
+        except Exception as e:
+
+            print(
+                "Failure DB error:",
+                repr(e),
+            )
 
     return web.Response(
 
@@ -3379,16 +2638,189 @@ async def payu_failure(
 <html>
 <head>
 <meta name="viewport"
-      content="width=device-width, initial-scale=1">
+content="width=device-width,initial-scale=1">
 <title>Payment Failed</title>
 </head>
 <body style="font-family:Arial;text-align:center;padding:40px">
 <h2>❌ Payment Failed</h2>
-<p>Please return to Telegram and create a new payment link.</p>
+<p>Please return to Telegram and try again.</p>
 </body>
 </html>
 """,
     )
+
+
+# ============================================================
+# EXPIRY WATCHER
+# ============================================================
+
+async def expiry_watcher():
+
+    print(
+        "Subscription expiry watcher started."
+    )
+
+    while True:
+
+        try:
+
+            subscriptions = (
+                await get_active_subscriptions()
+            )
+
+            current = now_ts()
+
+            for sub in subscriptions:
+
+                expires_at = (
+                    sub.get(
+                        "expires_at"
+                    )
+                )
+
+                if not expires_at:
+                    continue
+
+                try:
+                    expires_at = int(
+                        expires_at
+                    )
+                except Exception:
+                    continue
+
+                remaining = (
+                    expires_at
+                    - current
+                )
+
+                # ------------------------------------------------
+                # EXPIRED
+                # ------------------------------------------------
+
+                if remaining <= 0:
+
+                    if not sub.get(
+                        "expired_alert_sent"
+                    ):
+
+                        await update_subscription(
+                            sub["id"],
+                            {
+                                "status":
+                                    "expired",
+
+                                "expired_alert_sent":
+                                    True,
+                            },
+                        )
+
+                        try:
+
+                            plan = PLANS.get(
+                                sub[
+                                    "plan_key"
+                                ],
+                                {},
+                            )
+
+                            await bot.send_message(
+
+                                sub["user_id"],
+
+                                "⌛ <b>PLAN EXPIRED</b>\n"
+                                "━━━━━━━━━━━━━━━━━━\n\n"
+
+                                f"📦 Plan: "
+                                f"<b>{plan.get('name', sub['plan_key'])}</b>\n\n"
+
+                                "Aapka access period expire ho gaya hai.\n\n"
+
+                                "🔄 Renew karne ke liye "
+                                "neeche /start use karein.",
+                            )
+
+                        except Exception as e:
+
+                            print(
+                                "Expiry alert failed:",
+                                repr(e),
+                            )
+
+                    continue
+
+                # ------------------------------------------------
+                # REMINDER
+                # ------------------------------------------------
+
+                reminder_seconds = (
+                    EXPIRY_REMINDER_HOURS
+                    * 3600
+                )
+
+                if (
+                    remaining
+                    <= reminder_seconds
+                    and not sub.get(
+                        "reminder_sent"
+                    )
+                ):
+
+                    plan = PLANS.get(
+                        sub[
+                            "plan_key"
+                        ],
+                        {},
+                    )
+
+                    await update_subscription(
+                        sub["id"],
+                        {
+                            "reminder_sent":
+                                True,
+                        },
+                    )
+
+                    try:
+
+                        await bot.send_message(
+
+                            sub["user_id"],
+
+                            "⚠️ <b>PLAN EXPIRING SOON</b>\n"
+                            "━━━━━━━━━━━━━━━━━━\n\n"
+
+                            f"📦 Plan: "
+                            f"<b>{plan.get('name', sub['plan_key'])}</b>\n"
+
+                            f"⏳ Expires: "
+                            f"<b>{format_ts(expires_at)}</b>\n\n"
+
+                            "Renew karna na bhoolna.\n\n"
+
+                            "🔄 /start → plan select karein.",
+                        )
+
+                    except Exception as e:
+
+                        print(
+                            "Reminder failed:",
+                            repr(e),
+                        )
+
+        except asyncio.CancelledError:
+
+            raise
+
+        except Exception as e:
+
+            print(
+                "Expiry watcher error:",
+                repr(e),
+            )
+
+        await asyncio.sleep(
+            60
+        )
 
 
 # ============================================================
@@ -3402,12 +2834,10 @@ async def health(
     return web.json_response(
         {
             "ok": True,
-
             "service":
-                "telegram-store-bot-payu-payment-links",
-
+                "dark-store-payu-bot",
             "time":
-                int(time.time()),
+                now_ts(),
         }
     )
 
@@ -3420,201 +2850,115 @@ async def start_web_server():
 
     app = web.Application()
 
+    app.router.add_get(
+        "/",
+        health,
+    )
 
     app.router.add_get(
         "/health",
         health,
     )
 
-
     app.router.add_get(
         "/payu/success",
         payu_success,
     )
-
 
     app.router.add_post(
         "/payu/success",
         payu_success,
     )
 
-
     app.router.add_get(
         "/payu/failure",
         payu_failure,
     )
 
-
     app.router.add_post(
         "/payu/failure",
         payu_failure,
     )
-
 
     runner = web.AppRunner(
         app
     )
 
-
     await runner.setup()
 
-
     site = web.TCPSite(
-
         runner,
-
-        WEBHOOK_HOST,
-
-        WEBHOOK_PORT,
+        HOST,
+        PORT,
     )
-
 
     await site.start()
 
-
-    print()
     print(
-        "=============================================="
+        f"Web server running on {HOST}:{PORT}"
     )
-    print(
-        "PAYU WEB SERVER STARTED"
-    )
-    print(
-        "=============================================="
-    )
-
-
-    print(
-        "Health:",
-        f"{PUBLIC_BASE_URL}/health",
-    )
-
-
-    print(
-        "Success:",
-        f"{PUBLIC_BASE_URL}/payu/success",
-    )
-
-
-    print(
-        "Failure:",
-        f"{PUBLIC_BASE_URL}/payu/failure",
-    )
-
-
-    print(
-        "=============================================="
-    )
-
 
     return runner
 
 
 # ============================================================
-# CONFIG VALIDATION
+# VALIDATION
 # ============================================================
 
 def validate_config():
 
     errors = []
 
-
     if not BOT_TOKEN:
-
         errors.append(
             "BOT_TOKEN missing"
         )
 
-
-    if not PAYU_CLIENT_ID:
-
+    if not PAYU_KEY:
         errors.append(
-            "PAYU_CLIENT_ID missing"
+            "PAYU_KEY missing"
         )
 
-
-    if not PAYU_CLIENT_SECRET:
-
+    if not PAYU_SECRET:
         errors.append(
-            "PAYU_CLIENT_SECRET missing"
+            "PAYU_SECRET missing"
         )
 
-
-    if not PAYU_MERCHANT_ID:
-
+    if not SUPABASE_URL:
         errors.append(
-            "PAYU_MERCHANT_ID missing"
+            "SUPABASE_URL missing"
         )
 
+    if not SUPABASE_KEY:
+        errors.append(
+            "SUPABASE_KEY missing"
+        )
 
     if not PUBLIC_BASE_URL:
-
         errors.append(
             "PUBLIC_BASE_URL missing"
         )
 
-
-    if (
-        "localhost"
-        in PUBLIC_BASE_URL.lower()
-    ):
-
+    if "YOUR-DOMAIN" in PUBLIC_BASE_URL:
         errors.append(
-            "PUBLIC_BASE_URL cannot be localhost"
+            "Replace PUBLIC_BASE_URL"
         )
 
-
-    if (
-        "127.0.0.1"
-        in PUBLIC_BASE_URL.lower()
-    ):
-
+    if not ADMIN_IDS:
         errors.append(
-            "PUBLIC_BASE_URL cannot be 127.0.0.1"
+            "ADMIN_IDS missing"
         )
 
-
-    if (
-        "your-domain.com"
-        in PUBLIC_BASE_URL.lower()
-    ):
-
+    if "apitest.payu.in" in PAYU_URL.lower():
         errors.append(
-            "Replace example PUBLIC_BASE_URL"
+            "Test PayU URL detected. "
+            "Use production v2 endpoint."
         )
-
-
-    parsed = urlparse(
-        PUBLIC_BASE_URL
-    )
-
-
-    if parsed.scheme not in (
-        "http",
-        "https",
-    ):
-
-        errors.append(
-            "PUBLIC_BASE_URL must start with http:// or https://"
-        )
-
-
-    if (
-        PAYMENT_LINK_EXPIRY_MINUTES
-        < 5
-    ):
-
-        errors.append(
-            "PAYMENT_LINK_EXPIRY_MINUTES must be >= 5"
-        )
-
 
     if errors:
 
         raise RuntimeError(
-
             "Configuration errors:\n"
-
             + "\n".join(
                 "- " + x
                 for x in errors
@@ -3629,132 +2973,73 @@ def validate_config():
 async def main():
 
     global bot
-    global payment_watcher_task
-
+    global expiry_task
 
     validate_config()
 
-
-    init_db()
-
-
     bot = Bot(
-
         token=BOT_TOKEN,
-
         default=DefaultBotProperties(
-
             parse_mode=ParseMode.HTML
         ),
     )
 
-
     dp = Dispatcher()
-
 
     dp.include_router(
         router
     )
 
-
     runner = (
         await start_web_server()
     )
 
-
-    # --------------------------------------------------------
-    # PAYMENT WATCHER
-    # --------------------------------------------------------
-
-    payment_watcher_task = asyncio.create_task(
-        payment_watcher()
+    expiry_task = asyncio.create_task(
+        expiry_watcher()
     )
 
+    print()
+    print("=" * 70)
+    print("DARK STORE BOT STARTED")
+    print("=" * 70)
+    print(
+        "PayU:",
+        PAYU_URL,
+    )
+    print(
+        "Supabase:",
+        SUPABASE_URL,
+    )
+    print(
+        "Public URL:",
+        PUBLIC_BASE_URL,
+    )
+    print(
+        "Admins:",
+        ADMIN_IDS,
+    )
+    print("=" * 70)
 
     try:
-
-        print()
-        print(
-            "=============================================="
-        )
-
-        print(
-            "DARK STORE BOT STARTED"
-        )
-
-        print(
-            "=============================================="
-        )
-
-        print(
-            "Payment Gateway: PayU Payment Links"
-        )
-
-        print(
-            "OAuth URL:",
-            PAYU_TOKEN_URL,
-        )
-
-        print(
-            "Payment Link URL:",
-            PAYU_PAYMENT_LINK_URL,
-        )
-
-        print(
-            "Transaction URL:",
-            PAYU_TRANSACTION_URL,
-        )
-
-        print(
-            "Merchant ID:",
-            PAYU_MERCHANT_ID,
-        )
-
-        print(
-            "Payment Link Expiry:",
-            PAYMENT_LINK_EXPIRY_MINUTES,
-            "minutes",
-        )
-
-        print(
-            "Auto Verification:",
-            PAYMENT_CHECK_INTERVAL,
-            "seconds",
-        )
-
-        print(
-            "Public Base URL:",
-            PUBLIC_BASE_URL,
-        )
-
-        print(
-            "=============================================="
-        )
-
 
         await dp.start_polling(
             bot
         )
 
-
     finally:
 
-        if payment_watcher_task:
+        if expiry_task:
 
-            payment_watcher_task.cancel()
-
+            expiry_task.cancel()
 
             try:
 
-                await payment_watcher_task
+                await expiry_task
 
             except asyncio.CancelledError:
-
                 pass
 
-
         await runner.cleanup()
-
 
         await bot.session.close()
 

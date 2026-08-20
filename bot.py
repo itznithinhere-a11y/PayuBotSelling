@@ -211,7 +211,7 @@ PLANS = {
         "price": int(
             os.getenv(
                 "GOLD_PRICE",
-                "1",
+                "499",
             )
         ),
         "duration_days": int(

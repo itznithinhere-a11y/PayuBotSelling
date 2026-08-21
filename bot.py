@@ -74,6 +74,14 @@ logging.basicConfig(
 
 logger = logging.getLogger("dark-store")
 
+# ============================================================
+# SINGLE-SCREEN UI STATE
+# ============================================================
+# Bot UI stays on one message per user. Callback clicks edit the
+# existing message instead of creating a new message.
+UI_MESSAGES = {}
+
+
 
 # ============================================================
 # CONFIG
@@ -207,7 +215,7 @@ EXPIRY_REMINDER_HOURS = int(
 
 PLANS = {
     "gold": {
-        "name": "🥇 1 Year Premium",
+        "name": "🥇 Gold Premium",
         "price": int(
             os.getenv(
                 "GOLD_PRICE",
@@ -217,10 +225,10 @@ PLANS = {
         "duration_days": int(
             os.getenv(
                 "GOLD_DURATION_DAYS",
-                "365",
+                "30",
             )
         ),
-        "description": "1 Year Premium Access",
+        "description": "Gold Premium Access",
         "channel_id": os.getenv(
             "GOLD_CHANNEL_ID",
             "",
@@ -232,7 +240,7 @@ PLANS = {
     },
 
     "silver": {
-        "name": "♾️ Lifetime Premium",
+        "name": "🥈 Silver Premium",
         "price": int(
             os.getenv(
                 "SILVER_PRICE",
@@ -242,10 +250,10 @@ PLANS = {
         "duration_days": int(
             os.getenv(
                 "SILVER_DURATION_DAYS",
-                "0",
+                "30",
             )
         ),
-        "description": "Lifetime Premium Access",
+        "description": "Silver Premium Access",
         "channel_id": os.getenv(
             "SILVER_CHANNEL_ID",
             "",
@@ -1761,14 +1769,14 @@ def home_keyboard():
 
             [
                 InlineKeyboardButton(
-                    text="🥇 1 YEAR PREMIUM • ₹499",
+                    text="🥇 1 YEAR • ₹499",
                     callback_data="plan:gold",
                 ),
             ],
 
             [
                 InlineKeyboardButton(
-                    text="♾️ LIFETIME PREMIUM • ₹999",
+                    text="🥈 LIFETIME • ₹999",
                     callback_data="plan:silver",
                 ),
             ],
@@ -1791,9 +1799,9 @@ def plan_keyboard(
     ]
 
     if plan_key == "gold":
-        pay_text = "🥇 UNLOCK 1 YEAR • ₹499"
+        pay_text = "🥇 GET 1 YEAR • ₹499"
     else:
-        pay_text = "♾️ UNLOCK LIFETIME • ₹999"
+        pay_text = "🥈 GET LIFETIME • ₹999"
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -1853,6 +1861,12 @@ def payment_keyboard(
                     callback_data="myplans",
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    text="↩️ BACK",
+                    callback_data="home",
+                )
+            ],
         ]
     )
 
@@ -1880,41 +1894,91 @@ def myplans_keyboard():
 
 
 # ============================================================
-# HOME
+# HOME — SINGLE SCREEN / COMPACT PREMIUM UI
 # ============================================================
+
+def home_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💎 1 YEAR • ₹499",
+                    callback_data="plan:gold",
+                ),
+                InlineKeyboardButton(
+                    text="♾️ LIFETIME • ₹999",
+                    callback_data="plan:silver",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📋 MY PLANS",
+                    callback_data="myplans",
+                ),
+            ],
+        ]
+    )
+
+
+async def edit_ui(
+    message,
+    text,
+    reply_markup=None,
+):
+    """
+    Edit the current bot UI message.
+    If Telegram reports that the content is already identical,
+    simply ignore it.
+    """
+    try:
+        await message.edit_text(
+            text,
+            reply_markup=reply_markup,
+        )
+    except Exception as e:
+        # Telegram can return "message is not modified".
+        if "message is not modified" not in str(e).lower():
+            raise
+
 
 async def send_home(
     chat_id,
+    message=None,
 ):
-
-    support = (
-        f"@{SUPPORT_USERNAME}"
-        if SUPPORT_USERNAME
-        else "Admin"
-    )
-
     text = (
-        "✨ <b>WELCOME TO PREMIUM STORE</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-
-        "🔐 <b>Premium Channel Access</b>\n"
-        "⚡ Instant Access After Payment\n"
-        "🛡 Secure PayU Checkout\n"
-        "🚀 Automatic Verification\n\n"
-
-        "💎 <b>CHOOSE YOUR PLAN</b>\n\n"
-        "🥇 <b>1 YEAR</b> — ₹499 / 365 Days\n"
-        "♾️ <b>LIFETIME</b> — ₹999 / Lifetime\n\n"
-
-        "📌 Access automatically Telegram par deliver hoga.\n\n"
-        f"💬 Support: {support}"
+        "✨ <b>PREMIUM ACCESS</b>\n"
+        "💎 Secure • Instant • Automatic\n\n"
+        "🔥 <b>Choose your plan</b>"
     )
 
-    await bot.send_message(
+    if message is not None:
+        await edit_ui(
+            message,
+            text,
+            home_keyboard(),
+        )
+        UI_MESSAGES[chat_id] = message.message_id
+        return
+
+    # /start: remove the previous bot UI if we know it.
+    old_message_id = UI_MESSAGES.get(chat_id)
+
+    if old_message_id:
+        try:
+            await bot.delete_message(
+                chat_id=chat_id,
+                message_id=old_message_id,
+            )
+        except Exception:
+            pass
+
+    sent = await bot.send_message(
         chat_id,
         text,
         reply_markup=home_keyboard(),
     )
+
+    UI_MESSAGES[chat_id] = sent.message_id
 
 
 # ============================================================
@@ -1959,7 +2023,8 @@ async def home_callback(
     await callback.answer()
 
     await send_home(
-        callback.from_user.id
+        callback.from_user.id,
+        callback.message,
     )
 
 
@@ -1967,13 +2032,42 @@ async def home_callback(
 # PLAN DETAILS
 # ============================================================
 
+def plan_keyboard(plan_key):
+    if plan_key == "gold":
+        pay_text = "💳 GET 1 YEAR • ₹499"
+    else:
+        pay_text = "💳 GET LIFETIME • ₹999"
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=pay_text,
+                    callback_data=f"buy:{plan_key}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📋 MY PLANS",
+                    callback_data="myplans",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="↩️ BACK",
+                    callback_data="home",
+                ),
+            ],
+        ]
+    )
+
+
 @router.callback_query(
     F.data.startswith("plan:")
 )
 async def plan_callback(
     callback: CallbackQuery,
 ):
-
     await callback.answer()
 
     plan_key = callback.data.split(
@@ -1982,21 +2076,17 @@ async def plan_callback(
     )[1]
 
     if plan_key not in PLANS:
-
-        await callback.message.answer(
-            "❌ Invalid plan."
+        await edit_ui(
+            callback.message,
+            "❌ <b>Invalid plan.</b>",
+            home_keyboard(),
         )
-
         return
 
-    plan = PLANS[
-        plan_key
-    ]
+    plan = PLANS[plan_key]
 
     duration = int(
-        plan[
-            "duration_days"
-        ]
+        plan["duration_days"]
     )
 
     duration_text = (
@@ -2006,37 +2096,32 @@ async def plan_callback(
     )
 
     if plan_key == "gold":
-        benefits = (
-            "✨ Premium Channel Access\n"
-            "⚡ 1 Year Validity\n"
-            "🛡 Secure PayU Payment"
+        text = (
+            "💎 <b>1 YEAR PREMIUM</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            "💰 <b>₹499</b>\n"
+            "📅 <b>365 Days</b>\n\n"
+            "✨ Premium Access\n"
+            "⚡ Instant Delivery\n"
+            "🛡 Secure Payment\n"
+            "🔐 Auto Verification"
         )
     else:
-        benefits = (
-            "💎 Premium Channel Access\n"
-            "♾️ Lifetime Validity\n"
-            "🛡 Secure PayU Payment"
+        text = (
+            "♾️ <b>LIFETIME PREMIUM</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            "💰 <b>₹999</b>\n"
+            "📅 <b>Lifetime</b>\n\n"
+            "✨ Premium Access\n"
+            "🚀 Lifetime Delivery\n"
+            "🛡 Secure Payment\n"
+            "🔐 Auto Verification"
         )
 
-    text = (
-        f"<b>{plan['name']}</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"💰 Price: <b>₹{plan['price']}</b>\n"
-        f"📅 Duration: <b>{duration_text}</b>\n\n"
-
-        f"{benefits}\n"
-        "🔐 Automatic Verification\n"
-        "🔗 Automatic Channel Access\n\n"
-
-        "👇 Continue karne ke liye neeche unlock button dabao."
-    )
-
-    await callback.message.answer(
+    await edit_ui(
+        callback.message,
         text,
-        reply_markup=plan_keyboard(
-            plan_key
-        ),
+        plan_keyboard(plan_key),
     )
 
 
@@ -2062,7 +2147,7 @@ async def buy_callback(
 
     if plan_key not in PLANS:
 
-        await callback.message.answer(
+        await edit_ui(callback.message, 
             "❌ Invalid plan."
         )
 
@@ -2089,7 +2174,7 @@ async def buy_callback(
             eid,
         )
 
-        await callback.message.answer(
+        await edit_ui(callback.message, 
             "❌ <b>Payment create nahi ho paya.</b>\n\n"
 
             "Reason:\n"
@@ -2124,7 +2209,7 @@ async def buy_callback(
         f"<code>{result['txn_id']}</code>"
     )
 
-    await callback.message.answer(
+    await edit_ui(callback.message, 
         text,
         reply_markup=payment_keyboard(
             result["checkout_url"],
@@ -2159,7 +2244,7 @@ async def verify_callback(
 
     if not order:
 
-        await callback.message.answer(
+        await edit_ui(callback.message, 
             "❌ <b>Order nahi mila.</b>\n\n"
             "Transaction ID invalid ya purana ho sakta hai."
         )
@@ -2170,7 +2255,7 @@ async def verify_callback(
         order["user_id"]
     ) != callback.from_user.id:
 
-        await callback.message.answer(
+        await edit_ui(callback.message, 
             "❌ Ye order aapka nahi hai."
         )
 
@@ -2180,7 +2265,7 @@ async def verify_callback(
         "status"
     ) == "paid":
 
-        await callback.message.answer(
+        await edit_ui(callback.message, 
             "✅ <b>Payment already confirmed.</b>\n\n"
             "📋 /myplans"
         )
@@ -2204,7 +2289,7 @@ async def verify_callback(
             eid,
         )
 
-        await callback.message.answer(
+        await edit_ui(callback.message, 
             "⚠️ <b>Verification temporarily failed.</b>\n\n"
             "Thodi der baad dobara try karein.\n\n"
             f"Error ID: <code>{eid}</code>"
@@ -2233,7 +2318,7 @@ async def verify_callback(
                 eid,
             )
 
-            await callback.message.answer(
+            await edit_ui(callback.message, 
                 "⚠️ PayU ne payment successful confirm kiya hai, "
                 "lekin access delivery mein problem aayi.\n\n"
                 f"Error ID: <code>{eid}</code>"
@@ -2243,7 +2328,7 @@ async def verify_callback(
 
         if processed:
 
-            await callback.message.answer(
+            await edit_ui(callback.message, 
                 "🎉 <b>Payment Verified!</b>\n\n"
                 "🔗 Access details Telegram par bhej di gayi hain.\n\n"
                 "📋 Apna plan dekhne ke liye /myplans use karein."
@@ -2251,7 +2336,7 @@ async def verify_callback(
 
         else:
 
-            await callback.message.answer(
+            await edit_ui(callback.message, 
                 "⚠️ Payment verify hua, "
                 "lekin order process nahi ho saka."
             )
@@ -2285,7 +2370,7 @@ async def verify_callback(
         except Exception:
             pass
 
-        await callback.message.answer(
+        await edit_ui(callback.message, 
             "❌ <b>Payment successful nahi mila.</b>\n\n"
             f"PayU: <code>{message}</code>\n\n"
             "Agar amount deduct hua hai to thodi der baad "
@@ -2296,7 +2381,7 @@ async def verify_callback(
 
     if status == "error":
 
-        await callback.message.answer(
+        await edit_ui(callback.message, 
             "⚠️ <b>Verification abhi complete nahi hui.</b>\n\n"
             f"Reason: <code>{message}</code>\n\n"
             "Thodi der baad dobara try karein."
@@ -2304,7 +2389,7 @@ async def verify_callback(
 
         return
 
-    await callback.message.answer(
+    await edit_ui(callback.message, 
         "⏳ <b>Payment abhi confirm nahi hua.</b>\n\n"
         f"PayU: <code>{message}</code>\n\n"
         "10–30 seconds baad Verify Payment dobara press karein."

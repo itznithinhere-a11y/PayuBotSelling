@@ -1945,11 +1945,16 @@ async def send_home(
     chat_id,
     message=None,
 ):
-    text = (
-        "✨ <b>PREMIUM ACCESS</b>\n"
-        "💎 Secure • Instant • Automatic\n\n"
-        "🔥 <b>Choose your plan</b>"
-    )
+   text = (
+    "💎 <b>PREMIUM STORE</b> ✨\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "🔐 <b>Private • Secure • Exclusive</b>\n"
+    "⚡ Instant Access  •  🚀 Auto Delivery\n"
+    "🛡️ Secure Payment  •  ♾️ Lifetime Option\n\n"
+    "🔥 <b>Choose Your Premium Plan</b>\n"
+    "💰 One-time payment • No hidden charges\n\n"
+    "👇 <i>Select your plan to continue</i>"
+)
 
     if message is not None:
         await edit_ui(

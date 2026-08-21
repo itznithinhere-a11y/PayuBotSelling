@@ -1,19 +1,18 @@
 # ============================================================
 # DARK STORE — PRODUCTION TELEGRAM BOT
 # ============================================================
-#
-# FEATURES
+# Features
 # ------------------------------------------------------------
 # ✅ PayU V2 payment creation
 # ✅ PayU payment verification
-# ✅ Secure callback verification
-# ✅ Supabase users/orders/subscriptions
+# ✅ Secure PayU callback hash verification
+# ✅ Supabase users / orders / subscriptions
 # ✅ Automatic payment verification
 # ✅ Automatic channel invite generation
 # ✅ Static channel link fallback
-# ✅ Multiple active plans in My Plans
-# ✅ /myplan and /myplans same command
-# ✅ My Plans inline button
+# ✅ Multiple active plans
+# ✅ /myplan + /myplans
+# ✅ Single-screen inline UI
 # ✅ Correct callback user identification
 # ✅ Subscription expiry
 # ✅ Expiry reminder
@@ -22,20 +21,21 @@
 # ✅ Amount verification
 # ✅ Admin broadcast
 # ✅ Admin stats
+# ✅ Admin payment notification
 # ✅ Health endpoint
 # ✅ Production logging
-#
 # ============================================================
 
 import asyncio
 import hashlib
+import html
 import json
 import logging
 import os
 import secrets
 import time
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from email.utils import format_datetime
 from typing import Optional
 
@@ -69,43 +69,33 @@ load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
 logger = logging.getLogger("dark-store")
-
-# ============================================================
-# SINGLE-SCREEN UI STATE
-# ============================================================
-# Bot UI stays on one message per user. Callback clicks edit the
-# existing message instead of creating a new message.
-UI_MESSAGES = {}
-
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-BOT_TOKEN = os.getenv(
-    "BOT_TOKEN",
-    "",
-).strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+
+HOST = os.getenv("HOST", "0.0.0.0").strip()
+
+try:
+    PORT = int(os.getenv("PORT", "8080"))
+except ValueError:
+    PORT = 8080
 
 
 # ============================================================
 # PAYU
 # ============================================================
 
-PAYU_KEY = os.getenv(
-    "PAYU_KEY",
-    "",
-).strip()
+PAYU_KEY = os.getenv("PAYU_KEY", "").strip()
 
-PAYU_SECRET = os.getenv(
-    "PAYU_SECRET",
-    "",
-).strip()
+PAYU_SECRET = os.getenv("PAYU_SECRET", "").strip()
 
 PAYU_URL = os.getenv(
     "PAYU_URL",
@@ -122,11 +112,11 @@ PAYU_VERIFY_URL = os.getenv(
 # PUBLIC URL
 # ============================================================
 
-PUBLIC_BASE_URL = os.getenv(
-    "PUBLIC_BASE_URL",
-    "",
-).strip().rstrip("/")
-
+PUBLIC_BASE_URL = (
+    os.getenv("PUBLIC_BASE_URL", "")
+    .strip()
+    .rstrip("/")
+)
 
 SUCCESS_URL = (
     f"{PUBLIC_BASE_URL}/payu/success"
@@ -142,35 +132,19 @@ FAILURE_URL = (
 
 
 # ============================================================
-# SERVER
-# ============================================================
-
-HOST = os.getenv(
-    "HOST",
-    "0.0.0.0",
-).strip()
-
-PORT = int(
-    os.getenv(
-        "PORT",
-        "8080",
-    )
-)
-
-
-# ============================================================
 # SUPABASE
 # ============================================================
 
-SUPABASE_URL = os.getenv(
-    "SUPABASE_URL",
-    "",
-).strip().rstrip("/")
+SUPABASE_URL = (
+    os.getenv("SUPABASE_URL", "")
+    .strip()
+    .rstrip("/")
+)
 
-SUPABASE_SERVICE_ROLE_KEY = os.getenv(
-    "SUPABASE_SERVICE_ROLE_KEY",
-    "",
-).strip()
+SUPABASE_SERVICE_ROLE_KEY = (
+    os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    .strip()
+)
 
 
 # ============================================================
@@ -179,10 +153,7 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv(
 
 ADMIN_IDS = {
     int(x.strip())
-    for x in os.getenv(
-        "ADMIN_IDS",
-        "",
-    ).split(",")
+    for x in os.getenv("ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
 }
 
@@ -191,22 +162,26 @@ ADMIN_IDS = {
 # SUPPORT
 # ============================================================
 
-SUPPORT_USERNAME = os.getenv(
-    "SUPPORT_USERNAME",
-    "",
-).strip().lstrip("@")
+SUPPORT_USERNAME = (
+    os.getenv("SUPPORT_USERNAME", "")
+    .strip()
+    .lstrip("@")
+)
 
 
 # ============================================================
 # EXPIRY
 # ============================================================
 
-EXPIRY_REMINDER_HOURS = int(
-    os.getenv(
-        "EXPIRY_REMINDER_HOURS",
-        "24",
+try:
+    EXPIRY_REMINDER_HOURS = int(
+        os.getenv(
+            "EXPIRY_REMINDER_HOURS",
+            "24",
+        )
     )
-)
+except ValueError:
+    EXPIRY_REMINDER_HOURS = 24
 
 
 # ============================================================
@@ -217,16 +192,10 @@ PLANS = {
     "gold": {
         "name": "🥇 Gold Premium",
         "price": int(
-            os.getenv(
-                "GOLD_PRICE",
-                "499",
-            )
+            os.getenv("GOLD_PRICE", "499")
         ),
         "duration_days": int(
-            os.getenv(
-                "GOLD_DURATION_DAYS",
-                "30",
-            )
+            os.getenv("GOLD_DURATION_DAYS", "365")
         ),
         "description": "Gold Premium Access",
         "channel_id": os.getenv(
@@ -242,16 +211,10 @@ PLANS = {
     "silver": {
         "name": "🥈 Silver Premium",
         "price": int(
-            os.getenv(
-                "SILVER_PRICE",
-                "999",
-            )
+            os.getenv("SILVER_PRICE", "999")
         ),
         "duration_days": int(
-            os.getenv(
-                "SILVER_DURATION_DAYS",
-                "30",
-            )
+            os.getenv("SILVER_DURATION_DAYS", "0")
         ),
         "description": "Silver Premium Access",
         "channel_id": os.getenv(
@@ -276,6 +239,10 @@ router = Router()
 
 expiry_task: Optional[asyncio.Task] = None
 
+UI_MESSAGES = {}
+
+PAYMENT_LOCKS = {}
+
 
 # ============================================================
 # BASIC HELPERS
@@ -286,16 +253,15 @@ def now_ts() -> int:
 
 
 def format_ts(ts) -> str:
+
     if not ts:
         return "-"
 
     try:
-        ts = int(ts)
-
         from zoneinfo import ZoneInfo
 
         dt = datetime.fromtimestamp(
-            ts,
+            int(ts),
             ZoneInfo("Asia/Kolkata"),
         )
 
@@ -307,9 +273,7 @@ def format_ts(ts) -> str:
         return str(ts)
 
 
-def make_txnid(
-    user_id: int,
-) -> str:
+def make_txnid(user_id: int) -> str:
 
     random_part = secrets.token_hex(8)
 
@@ -321,10 +285,26 @@ def make_txnid(
 
 
 def error_id() -> str:
+
     return (
         f"E-{now_ts()}-"
         f"{secrets.token_hex(3).upper()}"
     )
+
+
+def safe_html(value) -> str:
+
+    return html.escape(
+        str(value or "")
+    )
+
+
+def get_payment_lock(txn_id: str):
+
+    if txn_id not in PAYMENT_LOCKS:
+        PAYMENT_LOCKS[txn_id] = asyncio.Lock()
+
+    return PAYMENT_LOCKS[txn_id]
 
 
 # ============================================================
@@ -364,6 +344,11 @@ async def create_payment(
     plan_key: str,
 ):
 
+    if plan_key not in PLANS:
+        raise RuntimeError(
+            "Invalid plan."
+        )
+
     txn_id = make_txnid(user_id)
 
     plan = PLANS[plan_key]
@@ -380,21 +365,14 @@ async def create_payment(
             "Payment amount must be greater than 0."
         )
 
-    if not SUCCESS_URL:
-        raise RuntimeError(
-            "PUBLIC_BASE_URL missing."
-        )
-
-    if not FAILURE_URL:
+    if not SUCCESS_URL or not FAILURE_URL:
         raise RuntimeError(
             "PUBLIC_BASE_URL missing."
         )
 
     payload = {
         "accountId": PAYU_KEY,
-
         "txnId": txn_id,
-
         "currency": "INR",
 
         "order": {
@@ -454,21 +432,17 @@ async def create_payment(
         usegmt=True,
     )
 
-    authorization = make_auth(
-        body,
-        date,
-    )
-
     headers = {
         "date": date,
-        "authorization": authorization,
+        "authorization": make_auth(
+            body,
+            date,
+        ),
         "content-type": "application/json",
         "accept": "application/json",
     }
 
-    timeout = aiohttp.ClientTimeout(
-        total=30
-    )
+    timeout = aiohttp.ClientTimeout(total=30)
 
     logger.info(
         "Creating PayU payment txn=%s plan=%s amount=%s",
@@ -492,23 +466,20 @@ async def create_payment(
                 text = await response.text()
 
                 logger.info(
-                    "PayU create HTTP=%s",
+                    "PayU create HTTP=%s txn=%s",
                     response.status,
+                    txn_id,
                 )
 
                 try:
                     data = json.loads(text)
-
                 except json.JSONDecodeError:
-
                     return (
                         None,
                         txn_id,
                         {
-                            "http_status":
-                                response.status,
-                            "raw_response":
-                                text,
+                            "http_status": response.status,
+                            "raw_response": text[:3000],
                         },
                     )
 
@@ -522,52 +493,26 @@ async def create_payment(
 
                 checkout_url = None
 
-                if isinstance(
-                    data,
-                    dict,
-                ):
+                if isinstance(data, dict):
 
-                    result = data.get(
-                        "result"
-                    )
+                    result = data.get("result")
 
-                    if isinstance(
-                        result,
-                        dict,
-                    ):
+                    if isinstance(result, dict):
 
                         checkout_url = (
-                            result.get(
-                                "checkoutUrl"
-                            )
-                            or result.get(
-                                "checkoutURL"
-                            )
-                            or result.get(
-                                "checkout_url"
-                            )
-                            or result.get(
-                                "paymentUrl"
-                            )
-                            or result.get(
-                                "paymentURL"
-                            )
-                            or result.get(
-                                "payment_url"
-                            )
+                            result.get("checkoutUrl")
+                            or result.get("checkoutURL")
+                            or result.get("checkout_url")
+                            or result.get("paymentUrl")
+                            or result.get("paymentURL")
+                            or result.get("payment_url")
                         )
 
                     checkout_url = (
                         checkout_url
-                        or data.get(
-                            "checkoutUrl"
-                        )
-                        or data.get(
-                            "checkoutURL"
-                        )
-                        or data.get(
-                            "checkout_url"
-                        )
+                        or data.get("checkoutUrl")
+                        or data.get("checkoutURL")
+                        or data.get("checkout_url")
                     )
 
                 return (
@@ -582,8 +527,7 @@ async def create_payment(
             None,
             txn_id,
             {
-                "error":
-                    "PayU request timeout"
+                "error": "PayU request timeout"
             },
         )
 
@@ -593,8 +537,7 @@ async def create_payment(
             None,
             txn_id,
             {
-                "error":
-                    f"HTTP error: {e}"
+                "error": f"HTTP error: {e}"
             },
         )
 
@@ -615,8 +558,7 @@ async def verify_payu_payment(
         return {
             "ok": False,
             "status": "invalid",
-            "message":
-                "Transaction ID missing.",
+            "message": "Transaction ID missing.",
             "raw": {},
         }
 
@@ -635,22 +577,18 @@ async def verify_payu_payment(
         usegmt=True,
     )
 
-    authorization = make_auth(
-        body,
-        date,
-    )
-
     headers = {
         "date": date,
-        "authorization": authorization,
+        "authorization": make_auth(
+            body,
+            date,
+        ),
         "content-type": "application/json",
         "accept": "application/json",
         "Info-Command": "verify_payment",
     }
 
-    timeout = aiohttp.ClientTimeout(
-        total=30
-    )
+    timeout = aiohttp.ClientTimeout(total=30)
 
     try:
 
@@ -668,7 +606,6 @@ async def verify_payu_payment(
 
                 try:
                     data = json.loads(text)
-
                 except json.JSONDecodeError:
 
                     return {
@@ -677,9 +614,8 @@ async def verify_payu_payment(
                         "message":
                             "PayU returned invalid response.",
                         "raw": {
-                            "http_status":
-                                response.status,
-                            "text": text,
+                            "http_status": response.status,
+                            "text": text[:3000],
                         },
                     }
 
@@ -695,52 +631,43 @@ async def verify_payu_payment(
 
                 result = (
                     data.get("result")
-                    if isinstance(
-                        data,
-                        dict,
-                    )
+                    if isinstance(data, dict)
                     else None
                 )
 
-                if isinstance(
-                    result,
-                    list,
-                ):
+                if isinstance(result, list):
+
                     item = (
                         result[0]
                         if result
                         else {}
                     )
 
-                elif isinstance(
-                    result,
-                    dict,
-                ):
+                elif isinstance(result, dict):
+
                     item = result
 
                 else:
+
                     item = {}
 
-                if not isinstance(
-                    item,
-                    dict,
-                ):
+                if not isinstance(item, dict):
                     item = {}
 
                 payu_status = str(
                     item.get("status")
-                    or item.get(
-                        "unmappedStatus"
-                    )
+                    or item.get("unmappedStatus")
                     or ""
                 ).strip().lower()
 
                 message = str(
                     item.get("message")
-                    or data.get("message")
-                    or item.get(
-                        "errorMessage"
+                    or (
+                        data.get("message")
+                        if isinstance(data, dict)
+                        else ""
                     )
+                    or item.get("errorMessage")
                     or ""
                 )
 
@@ -751,36 +678,26 @@ async def verify_payu_payment(
                         "status": "success",
                         "message":
                             message
-                            or
-                            "Payment successful.",
+                            or "Payment successful.",
                         "raw": data,
                         "result": item,
+
                         "txn_id": str(
-                            item.get(
-                                "txnId"
-                            )
+                            item.get("txnId")
                             or txn_id
                         ),
+
                         "payment_id": str(
-                            item.get(
-                                "mihpayId"
-                            )
-                            or item.get(
-                                "mihpayid"
-                            )
-                            or item.get(
-                                "bankReferenceNumber"
-                            )
+                            item.get("mihpayId")
+                            or item.get("mihpayid")
+                            or item.get("bankReferenceNumber")
                             or txn_id
                         ),
+
                         "amount": (
                             item.get("amount")
-                            if item.get(
-                                "amount"
-                            ) is not None
-                            else item.get(
-                                "originalAmount"
-                            )
+                            if item.get("amount") is not None
+                            else item.get("originalAmount")
                         ),
                     }
 
@@ -811,8 +728,7 @@ async def verify_payu_payment(
                     "status": status,
                     "message":
                         message
-                        or
-                        "Payment not successful yet.",
+                        or "Payment not successful yet.",
                     "raw": data,
                     "result": item,
                     "txn_id": txn_id,
@@ -898,9 +814,7 @@ async def supabase_request(
         f"{table}"
     )
 
-    timeout = aiohttp.ClientTimeout(
-        total=30
-    )
+    timeout = aiohttp.ClientTimeout(total=30)
 
     async with aiohttp.ClientSession(
         timeout=timeout
@@ -923,9 +837,7 @@ async def supabase_request(
 
             else:
                 try:
-                    data = json.loads(
-                        text
-                    )
+                    data = json.loads(text)
                 except Exception:
                     data = {
                         "raw": text
@@ -950,32 +862,44 @@ async def save_user(
     tg_user,
 ):
 
+    if not tg_user:
+        return
+
     data = {
-        "user_id":
-            tg_user.id,
-
-        "username":
-            tg_user.username,
-
-        "first_name":
-            tg_user.first_name,
-
-        "last_name":
-            tg_user.last_name,
-
-        "updated_at":
-            now_ts(),
+        "user_id": tg_user.id,
+        "username": tg_user.username,
+        "first_name": tg_user.first_name,
+        "last_name": tg_user.last_name,
+        "updated_at": now_ts(),
     }
 
     await supabase_request(
         "POST",
         "bot_users",
         params={
-            "on_conflict":
-                "user_id",
+            "on_conflict": "user_id",
         },
         json_data=data,
     )
+
+
+async def get_user(
+    user_id: int,
+):
+
+    result = await supabase_request(
+        "GET",
+        "bot_users",
+        params={
+            "user_id": f"eq.{user_id}",
+            "limit": "1",
+        },
+    )
+
+    if isinstance(result, list) and result:
+        return result[0]
+
+    return None
 
 
 # ============================================================
@@ -992,29 +916,14 @@ async def create_order(
 ):
 
     data = {
-        "reference_id":
-            reference_id,
-
-        "user_id":
-            user_id,
-
-        "plan_key":
-            plan_key,
-
-        "amount_paise":
-            amount_paise,
-
-        "txn_id":
-            txn_id,
-
-        "status":
-            "created",
-
-        "created_at":
-            now_ts(),
-
-        "access_sent":
-            False,
+        "reference_id": reference_id,
+        "user_id": user_id,
+        "plan_key": plan_key,
+        "amount_paise": amount_paise,
+        "txn_id": txn_id,
+        "status": "created",
+        "created_at": now_ts(),
+        "access_sent": False,
     }
 
     result = await supabase_request(
@@ -1023,10 +932,7 @@ async def create_order(
         json_data=data,
     )
 
-    if (
-        isinstance(result, list)
-        and result
-    ):
+    if isinstance(result, list) and result:
         return result[0]
 
     return result
@@ -1040,18 +946,12 @@ async def get_order_by_txn(
         "GET",
         "orders",
         params={
-            "txn_id":
-                f"eq.{txn_id}",
-
-            "limit":
-                "1",
+            "txn_id": f"eq.{txn_id}",
+            "limit": "1",
         },
     )
 
-    if (
-        isinstance(result, list)
-        and result
-    ):
+    if isinstance(result, list) and result:
         return result[0]
 
     return None
@@ -1077,6 +977,29 @@ async def update_order(
 # SUBSCRIPTIONS
 # ============================================================
 
+async def get_existing_active_same_plan(
+    user_id: int,
+    plan_key: str,
+):
+
+    result = await supabase_request(
+        "GET",
+        "subscriptions",
+        params={
+            "user_id": f"eq.{user_id}",
+            "plan_key": f"eq.{plan_key}",
+            "status": "eq.active",
+            "order": "expires_at.desc",
+            "limit": "1",
+        },
+    )
+
+    if isinstance(result, list) and result:
+        return result[0]
+
+    return None
+
+
 async def create_subscription(
     order,
     payment_id,
@@ -1096,45 +1019,27 @@ async def create_subscription(
     started_at = now_ts()
 
     if duration_days <= 0:
+
         expires_at = None
+
     else:
+
         expires_at = (
             started_at
             + duration_days * 86400
         )
 
-    # --------------------------------------------------------
-    # Extend existing active same-plan subscription
-    # --------------------------------------------------------
-
-    existing = await supabase_request(
-        "GET",
-        "subscriptions",
-        params={
-            "user_id":
-                f"eq.{order['user_id']}",
-
-            "plan_key":
-                f"eq.{order['plan_key']}",
-
-            "status":
-                "eq.active",
-
-            "order":
-                "expires_at.desc",
-
-            "limit":
-                "1",
-        },
+    existing = await get_existing_active_same_plan(
+        order["user_id"],
+        order["plan_key"],
     )
 
     if (
-        duration_days > 0
-        and isinstance(existing, list)
-        and existing
+        existing
+        and duration_days > 0
     ):
 
-        old_expiry = existing[0].get(
+        old_expiry = existing.get(
             "expires_at"
         )
 
@@ -1150,9 +1055,27 @@ async def create_subscription(
 
                     expires_at = (
                         old_expiry
-                        + duration_days
-                        * 86400
+                        + duration_days * 86400
                     )
+
+                    # Extend existing subscription
+                    result = await update_subscription(
+                        existing["id"],
+                        {
+                            "expires_at": expires_at,
+                            "payment_id": payment_id,
+                            "order_reference":
+                                order["reference_id"],
+                            "reminder_sent": False,
+                            "expired_alert_sent": False,
+                            "status": "active",
+                        },
+                    )
+
+                    if isinstance(result, list) and result:
+                        return result[0]
+
+                    return existing
 
             except Exception:
                 pass
@@ -1195,13 +1118,26 @@ async def create_subscription(
         json_data=data,
     )
 
-    if (
-        isinstance(result, list)
-        and result
-    ):
+    if isinstance(result, list) and result:
         return result[0]
 
     return result
+
+
+async def update_subscription(
+    subscription_id,
+    values,
+):
+
+    return await supabase_request(
+        "PATCH",
+        "subscriptions",
+        params={
+            "id":
+                f"eq.{subscription_id}",
+        },
+        json_data=values,
+    )
 
 
 async def get_user_active_subscriptions(
@@ -1212,28 +1148,17 @@ async def get_user_active_subscriptions(
         "GET",
         "subscriptions",
         params={
-            "user_id":
-                f"eq.{user_id}",
-
-            "status":
-                "eq.active",
-
-            "order":
-                "started_at.desc",
-
-            "limit":
-                "100",
+            "user_id": f"eq.{user_id}",
+            "status": "eq.active",
+            "order": "started_at.desc",
+            "limit": "100",
         },
     )
 
-    if not isinstance(
-        result,
-        list,
-    ):
+    if not isinstance(result, list):
         return []
 
     current = now_ts()
-
     active = []
 
     for sub in result:
@@ -1245,6 +1170,7 @@ async def get_user_active_subscriptions(
         if expires_at:
 
             try:
+
                 expires_int = int(
                     expires_at
                 )
@@ -1254,10 +1180,8 @@ async def get_user_active_subscriptions(
                     await update_subscription(
                         sub["id"],
                         {
-                            "status":
-                                "expired",
-                            "expired_alert_sent":
-                                True,
+                            "status": "expired",
+                            "expired_alert_sent": True,
                         },
                     )
 
@@ -1277,37 +1201,15 @@ async def get_active_subscriptions():
         "GET",
         "subscriptions",
         params={
-            "status":
-                "eq.active",
-
-            "limit":
-                "1000",
+            "status": "eq.active",
+            "limit": "1000",
         },
     )
 
-    if isinstance(
-        result,
-        list,
-    ):
+    if isinstance(result, list):
         return result
 
     return []
-
-
-async def update_subscription(
-    subscription_id,
-    values,
-):
-
-    return await supabase_request(
-        "PATCH",
-        "subscriptions",
-        params={
-            "id":
-                f"eq.{subscription_id}",
-        },
-        json_data=values,
-    )
 
 
 # ============================================================
@@ -1324,7 +1226,6 @@ async def event_processed(
         params={
             "event_id":
                 f"eq.{event_id}",
-
             "limit":
                 "1",
         },
@@ -1346,7 +1247,6 @@ async def save_event(
         json_data={
             "event_id":
                 event_id,
-
             "created_at":
                 now_ts(),
         },
@@ -1364,9 +1264,7 @@ async def make_access_link(
     if not bot:
         return None
 
-    plan = PLANS.get(
-        plan_key
-    )
+    plan = PLANS.get(plan_key)
 
     if not plan:
         return None
@@ -1374,10 +1272,6 @@ async def make_access_link(
     channel_id = plan.get(
         "channel_id"
     )
-
-    # --------------------------------------------------------
-    # Dynamic invite link
-    # --------------------------------------------------------
 
     if channel_id:
 
@@ -1395,14 +1289,11 @@ async def make_access_link(
         except Exception as e:
 
             logger.warning(
-                "Invite creation failed plan=%s error=%r",
+                "Invite creation failed "
+                "plan=%s error=%r",
                 plan_key,
                 e,
             )
-
-    # --------------------------------------------------------
-    # Static fallback
-    # --------------------------------------------------------
 
     static_link = plan.get(
         "access_link"
@@ -1412,6 +1303,116 @@ async def make_access_link(
         return static_link
 
     return None
+
+
+# ============================================================
+# ADMIN PAYMENT NOTIFICATION
+# ============================================================
+
+async def notify_admin_payment(
+    order,
+    payment_id,
+    subscription,
+):
+
+    if not ADMIN_IDS or not bot:
+        return
+
+    user_id = order.get(
+        "user_id"
+    )
+
+    plan_key = order.get(
+        "plan_key"
+    )
+
+    plan = PLANS.get(
+        plan_key,
+        {},
+    )
+
+    amount_paise = int(
+        order.get(
+            "amount_paise",
+            0,
+        )
+        or 0
+    )
+
+    amount = amount_paise / 100
+
+    user = None
+
+    try:
+        user = await get_user(
+            int(user_id)
+        )
+    except Exception:
+        pass
+
+    username = (
+        f"@{user.get('username')}"
+        if user and user.get("username")
+        else "No username"
+    )
+
+    first_name = (
+        user.get("first_name")
+        if user
+        else "Unknown"
+    )
+
+    expires_at = (
+        subscription.get("expires_at")
+        if subscription
+        else None
+    )
+
+    if expires_at:
+        expiry = format_ts(expires_at)
+    else:
+        expiry = "Lifetime"
+
+    text = (
+        "💰 <b>NEW PAYMENT RECEIVED</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+
+        f"👤 User: <b>{safe_html(first_name)}</b>\n"
+        f"🆔 User ID: <code>{user_id}</code>\n"
+        f"🔗 Username: {safe_html(username)}\n\n"
+
+        f"📦 Plan: <b>{safe_html(plan.get('name', plan_key))}</b>\n"
+        f"💰 Amount: <b>₹{amount:.2f}</b>\n"
+        f"📌 Status: <b>PAID</b>\n"
+        f"⏳ Expiry: <b>{safe_html(expiry)}</b>\n\n"
+
+        f"🧾 Order:\n"
+        f"<code>{safe_html(order.get('reference_id'))}</code>\n\n"
+
+        f"🔐 Transaction:\n"
+        f"<code>{safe_html(order.get('txn_id'))}</code>\n\n"
+
+        f"💳 Payment ID:\n"
+        f"<code>{safe_html(payment_id)}</code>"
+    )
+
+    for admin_id in ADMIN_IDS:
+
+        try:
+
+            await bot.send_message(
+                admin_id,
+                text,
+            )
+
+        except Exception as e:
+
+            logger.warning(
+                "Admin payment notification "
+                "failed admin=%s error=%r",
+                admin_id,
+                e,
+            )
 
 
 # ============================================================
@@ -1435,23 +1436,31 @@ async def deliver_access(
             "Subscription creation failed."
         )
 
-    access_link = await make_access_link(
-        order["plan_key"]
+    access_link = (
+        subscription.get(
+            "access_link"
+        )
     )
 
-    if access_link:
+    if not access_link:
 
-        await update_subscription(
-            subscription["id"],
-            {
-                "access_link":
-                    access_link,
-            },
+        access_link = await make_access_link(
+            order["plan_key"]
         )
 
-        subscription[
-            "access_link"
-        ] = access_link
+        if access_link:
+
+            await update_subscription(
+                subscription["id"],
+                {
+                    "access_link":
+                        access_link,
+                },
+            )
+
+            subscription[
+                "access_link"
+            ] = access_link
 
     plan = PLANS[
         order["plan_key"]
@@ -1481,7 +1490,7 @@ async def deliver_access(
 
         access_text = (
             "🔗 <b>Channel Access</b>\n"
-            f"{access_link}"
+            f"{safe_html(access_link)}"
         )
 
     else:
@@ -1494,18 +1503,30 @@ async def deliver_access(
 
         access_text = (
             "⚠️ Channel link generate nahi ho paya.\n"
-            f"Support: {support}"
+            f"Support: {safe_html(support)}"
         )
 
-    await bot.send_message(
+    # --------------------------------------------------------
+    # Update order BEFORE sending notifications.
+    # This protects against duplicate callback delivery.
+    # --------------------------------------------------------
 
-        order["user_id"],
+    await update_order(
+        order["reference_id"],
+        {
+            "status": "paid",
+            "payment_id": payment_id,
+            "paid_at": now_ts(),
+            "access_sent": True,
+        },
+    )
 
+    user_text = (
         "🎉 <b>PAYMENT CONFIRMED!</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
 
         f"📦 Plan: "
-        f"<b>{plan['name']}</b>\n"
+        f"<b>{safe_html(plan['name'])}</b>\n"
 
         f"💰 Paid: "
         f"<b>₹{plan['price']}</b>\n"
@@ -1514,28 +1535,44 @@ async def deliver_access(
 
         f"{access_text}\n\n"
 
-        "📋 /myplans se apne active plans kabhi bhi check kar sakte ho.\n\n"
+        "📋 /myplans se apne active plans "
+        "kabhi bhi check kar sakte ho.\n\n"
 
-        f"🧾 Transaction:\n"
-        f"<code>{order.get('txn_id')}</code>",
+        "🧾 Transaction:\n"
+        f"<code>{safe_html(order.get('txn_id'))}</code>"
     )
 
-    await update_order(
-        order["reference_id"],
-        {
-            "status":
-                "paid",
+    try:
 
-            "payment_id":
-                payment_id,
+        await bot.send_message(
+            order["user_id"],
+            user_text,
+        )
 
-            "paid_at":
-                now_ts(),
+    except Exception as e:
 
-            "access_sent":
-                True,
-        },
-    )
+        logger.warning(
+            "User delivery message failed "
+            "user=%s error=%r",
+            order["user_id"],
+            e,
+        )
+
+    try:
+
+        await notify_admin_payment(
+            order,
+            payment_id,
+            subscription,
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Admin notification error"
+        )
+
+    return subscription
 
 
 # ============================================================
@@ -1559,118 +1596,121 @@ async def process_successful_payment(
         txn_id
     ).strip()
 
-    order = await get_order_by_txn(
-        txn_id
-    )
+    async with get_payment_lock(txn_id):
 
-    if not order:
-        logger.error(
-            "Order not found txn=%s",
-            txn_id,
+        order = await get_order_by_txn(
+            txn_id
         )
-        return False
 
-    if order.get(
-        "status"
-    ) == "paid":
-        return True
+        if not order:
 
-    # --------------------------------------------------------
-    # Amount validation
-    # --------------------------------------------------------
+            logger.error(
+                "Order not found txn=%s",
+                txn_id,
+            )
 
-    received_amount = (
-        data.get("amount")
-        or data.get("amt")
-    )
+            return False
 
-    if received_amount:
+        if str(order.get("status")).lower() == "paid":
+            return True
 
-        try:
+        # ----------------------------------------------------
+        # Amount verification
+        # ----------------------------------------------------
 
-            expected = (
-                float(
-                    order[
-                        "amount_paise"
-                    ]
+        received_amount = (
+            data.get("amount")
+            or data.get("amt")
+        )
+
+        if received_amount is not None:
+
+            try:
+
+                expected = (
+                    float(
+                        order["amount_paise"]
+                    ) / 100
                 )
-                / 100
-            )
 
-            received = float(
-                received_amount
-            )
+                received = float(
+                    received_amount
+                )
 
-            if abs(
-                expected - received
-            ) > 0.01:
+                if abs(
+                    expected - received
+                ) > 0.01:
+
+                    logger.error(
+                        "Amount mismatch "
+                        "txn=%s expected=%s received=%s",
+                        txn_id,
+                        expected,
+                        received,
+                    )
+
+                    return False
+
+            except Exception:
 
                 logger.error(
-                    "Amount mismatch expected=%s received=%s",
-                    expected,
-                    received,
+                    "Amount validation failed txn=%s",
+                    txn_id,
                 )
 
                 return False
 
-        except Exception:
+        payment_id = (
+            data.get("mihpayid")
+            or data.get("paymentId")
+            or data.get("bank_ref_num")
+            or txn_id
+        )
 
+        payment_id = str(
+            payment_id
+        )
+
+        event_id = (
+            f"paid:"
+            f"{txn_id}:"
+            f"{payment_id}"
+        )
+
+        if await event_processed(
+            event_id
+        ):
+            return True
+
+        subscription = await deliver_access(
+            order,
+            payment_id,
+        )
+
+        if not subscription:
             return False
 
-    payment_id = (
-        data.get("mihpayid")
-        or data.get("paymentId")
-        or data.get("bank_ref_num")
-        or txn_id
-    )
+        await save_event(
+            event_id
+        )
 
-    payment_id = str(
-        payment_id
-    )
-
-    event_id = (
-        f"paid:"
-        f"{txn_id}:"
-        f"{payment_id}"
-    )
-
-    if await event_processed(
-        event_id
-    ):
         return True
-
-    await deliver_access(
-        order,
-        payment_id,
-    )
-
-    await save_event(
-        event_id
-    )
-
-    return True
 
 
 async def process_verified_payu_result(
     verification,
 ):
 
-    if not verification.get(
-        "ok"
-    ):
+    if not verification.get("ok"):
         return False
 
     txn_id = str(
-        verification.get(
-            "txn_id"
-        )
+        verification.get("txn_id")
         or ""
     ).strip()
 
     payment_id = str(
-        verification.get(
-            "payment_id"
-        )
+        verification.get("payment_id")
         or txn_id
     ).strip()
 
@@ -1680,17 +1720,10 @@ async def process_verified_payu_result(
 
     return await process_successful_payment(
         {
-            "txnid":
-                txn_id,
-
-            "mihpayid":
-                payment_id,
-
-            "amount":
-                amount,
-
-            "status":
-                "success",
+            "txnid": txn_id,
+            "mihpayid": payment_id,
+            "amount": amount,
+            "status": "success",
         }
     )
 
@@ -1703,6 +1736,11 @@ async def create_plan_payment(
     user_id,
     plan_key,
 ):
+
+    if plan_key not in PLANS:
+        raise RuntimeError(
+            "Invalid plan."
+        )
 
     plan = PLANS[
         plan_key
@@ -1769,26 +1807,25 @@ def home_keyboard():
 
             [
                 InlineKeyboardButton(
-                    text="🥇 1 YEAR • ₹499",
+                    text="💎 1 YEAR • ₹499",
                     callback_data="plan:gold",
                 ),
-            ],
 
-            [
                 InlineKeyboardButton(
-                    text="🥈 LIFETIME • ₹999",
+                    text="♾️ LIFETIME • ₹999",
                     callback_data="plan:silver",
                 ),
             ],
 
             [
                 InlineKeyboardButton(
-                    text="📋 MY ACTIVE PLANS",
+                    text="📋 MY PLANS",
                     callback_data="myplans",
                 ),
             ],
         ]
     )
+
 
 def plan_keyboard(
     plan_key,
@@ -1798,10 +1835,23 @@ def plan_keyboard(
         plan_key
     ]
 
-    if plan_key == "gold":
-        pay_text = "🥇 GET 1 YEAR • ₹499"
+    duration = int(
+        plan.get(
+            "duration_days",
+            0,
+        )
+    )
+
+    if duration <= 0:
+        duration_text = "LIFETIME"
+    elif duration == 365:
+        duration_text = "1 YEAR"
     else:
-        pay_text = "🥈 GET LIFETIME • ₹999"
+        duration_text = f"{duration} DAYS"
+
+    pay_text = (
+        f"💳 GET {duration_text} • ₹{plan['price']}"
+    )
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -1812,24 +1862,25 @@ def plan_keyboard(
                     callback_data=(
                         f"buy:{plan_key}"
                     ),
-                )
+                ),
             ],
 
             [
                 InlineKeyboardButton(
-                    text="📋 MY ACTIVE PLANS",
+                    text="📋 MY PLANS",
                     callback_data="myplans",
-                )
+                ),
             ],
 
             [
                 InlineKeyboardButton(
-                    text="🏠 BACK TO STORE",
+                    text="↩️ BACK",
                     callback_data="home",
-                )
+                ),
             ],
         ]
     )
+
 
 def payment_keyboard(
     checkout_url,
@@ -1841,31 +1892,32 @@ def payment_keyboard(
 
             [
                 InlineKeyboardButton(
-                    text="💳 Pay Now",
+                    text="💳 PAY NOW",
                     url=checkout_url,
-                )
+                ),
             ],
 
             [
                 InlineKeyboardButton(
-                    text="🔄 Verify Payment",
+                    text="🔄 VERIFY PAYMENT",
                     callback_data=(
                         f"verify:{txn_id}"
                     ),
-                )
+                ),
             ],
 
             [
                 InlineKeyboardButton(
-                    text="📋 My Plans",
+                    text="📋 MY PLANS",
                     callback_data="myplans",
-                )
+                ),
             ],
+
             [
                 InlineKeyboardButton(
                     text="↩️ BACK",
                     callback_data="home",
-                )
+                ),
             ],
         ]
     )
@@ -1878,66 +1930,44 @@ def myplans_keyboard():
 
             [
                 InlineKeyboardButton(
-                    text="🛒 Buy / Renew Plan",
+                    text="🛒 BUY / RENEW PLAN",
                     callback_data="home",
-                )
-            ],
-
-            [
-                InlineKeyboardButton(
-                    text="🔄 Refresh",
-                    callback_data="myplans",
-                )
-            ],
-        ]
-    )
-
-
-# ============================================================
-# HOME — SINGLE SCREEN / COMPACT PREMIUM UI
-# ============================================================
-
-def home_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="💎 1 YEAR • ₹499",
-                    callback_data="plan:gold",
-                ),
-                InlineKeyboardButton(
-                    text="♾️ LIFETIME • ₹999",
-                    callback_data="plan:silver",
                 ),
             ],
+
             [
                 InlineKeyboardButton(
-                    text="📋 MY PLANS",
+                    text="🔄 REFRESH",
                     callback_data="myplans",
                 ),
             ],
         ]
     )
 
+
+# ============================================================
+# UI EDIT
+# ============================================================
 
 async def edit_ui(
     message,
     text,
     reply_markup=None,
 ):
-    """
-    Edit the current bot UI message.
-    If Telegram reports that the content is already identical,
-    simply ignore it.
-    """
+
     try:
+
         await message.edit_text(
             text,
             reply_markup=reply_markup,
         )
+
     except Exception as e:
-        # Telegram can return "message is not modified".
-        if "message is not modified" not in str(e).lower():
+
+        if (
+            "message is not modified"
+            not in str(e).lower()
+        ):
             raise
 
 
@@ -1945,34 +1975,46 @@ async def send_home(
     chat_id,
     message=None,
 ):
+
     text = (
         "💎 <b>PREMIUM STORE</b> ✨\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "🔐 <b>Private • Secure • Exclusive</b>\n"
-        "⚡ Instant Access  •  🚀 Auto Delivery\n"
-        "🛡️ Secure Payment  •  ♾️ Lifetime Option\n\n"
-        "🔥 <b>Choose Your Premium Plan</b>\n"
-        "💰 One-time payment • No hidden charges\n\n"
+        "⚡ Instant Access • 🚀 Auto Delivery\n"
+        "🛡️ Secure Payment • ♾️ Lifetime Option\n\n"
+        "🔥 <b>Choose Your Premium Plan</b>\n\n"
+        "💎 <b>Gold</b> — 1 Year — ₹499\n"
+        "♾️ <b>Silver</b> — Lifetime — ₹999\n\n"
         "👇 <i>Select your plan to continue</i>"
     )
 
     if message is not None:
+
         await edit_ui(
             message,
             text,
             home_keyboard(),
         )
-        UI_MESSAGES[chat_id] = message.message_id
+
+        UI_MESSAGES[
+            chat_id
+        ] = message.message_id
+
         return
 
-    old_message_id = UI_MESSAGES.get(chat_id)
+    old_message_id = UI_MESSAGES.get(
+        chat_id
+    )
 
     if old_message_id:
+
         try:
+
             await bot.delete_message(
                 chat_id=chat_id,
                 message_id=old_message_id,
             )
+
         except Exception:
             pass
 
@@ -1982,7 +2024,9 @@ async def send_home(
         reply_markup=home_keyboard(),
     )
 
-    UI_MESSAGES[chat_id] = sent.message_id
+    UI_MESSAGES[
+        chat_id
+    ] = sent.message_id
 
 
 # ============================================================
@@ -1997,6 +2041,7 @@ async def start_handler(
 ):
 
     try:
+
         await save_user(
             message.from_user
         )
@@ -2036,42 +2081,13 @@ async def home_callback(
 # PLAN DETAILS
 # ============================================================
 
-def plan_keyboard(plan_key):
-    if plan_key == "gold":
-        pay_text = "💳 GET 1 YEAR • ₹499"
-    else:
-        pay_text = "💳 GET LIFETIME • ₹999"
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=pay_text,
-                    callback_data=f"buy:{plan_key}",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📋 MY PLANS",
-                    callback_data="myplans",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="↩️ BACK",
-                    callback_data="home",
-                ),
-            ],
-        ]
-    )
-
-
 @router.callback_query(
     F.data.startswith("plan:")
 )
 async def plan_callback(
     callback: CallbackQuery,
 ):
+
     await callback.answer()
 
     plan_key = callback.data.split(
@@ -2080,47 +2096,52 @@ async def plan_callback(
     )[1]
 
     if plan_key not in PLANS:
+
         await edit_ui(
             callback.message,
             "❌ <b>Invalid plan.</b>",
             home_keyboard(),
         )
+
         return
 
-    plan = PLANS[plan_key]
+    plan = PLANS[
+        plan_key
+    ]
 
     duration = int(
         plan["duration_days"]
     )
 
-    duration_text = (
-        "♾️ Lifetime"
-        if duration <= 0
-        else f"⏳ {duration} Days"
-    )
+    if duration <= 0:
 
-    if plan_key == "gold":
-        text = (
-            "💎 <b>1 YEAR PREMIUM</b>\n"
-            "━━━━━━━━━━━━━━\n"
-            "💰 <b>₹499</b>\n"
-            "📅 <b>365 Days</b>\n\n"
-            "✨ Premium Access\n"
-            "⚡ Instant Delivery\n"
-            "🛡 Secure Payment\n"
-            "🔐 Auto Verification"
-        )
+        duration_text = "♾️ Lifetime"
+
+    elif duration == 365:
+
+        duration_text = "📅 1 Year"
+
     else:
-        text = (
-            "♾️ <b>LIFETIME PREMIUM</b>\n"
-            "━━━━━━━━━━━━━━\n"
-            "💰 <b>₹999</b>\n"
-            "📅 <b>Lifetime</b>\n\n"
-            "✨ Premium Access\n"
-            "🚀 Lifetime Delivery\n"
-            "🛡 Secure Payment\n"
-            "🔐 Auto Verification"
+
+        duration_text = (
+            f"📅 {duration} Days"
         )
+
+    text = (
+        f"{plan['name']}\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+
+        f"💰 <b>₹{plan['price']}</b>\n"
+        f"{duration_text}\n\n"
+
+        "✨ Premium Access\n"
+        "⚡ Instant Delivery\n"
+        "🛡 Secure Payment\n"
+        "🔐 Auto Verification\n"
+        "📋 Multiple Plans Supported\n\n"
+
+        "👇 Continue to payment"
+    )
 
     await edit_ui(
         callback.message,
@@ -2151,8 +2172,10 @@ async def buy_callback(
 
     if plan_key not in PLANS:
 
-        await edit_ui(callback.message, 
-            "❌ Invalid plan."
+        await edit_ui(
+            callback.message,
+            "❌ Invalid plan.",
+            home_keyboard(),
         )
 
         return
@@ -2178,13 +2201,17 @@ async def buy_callback(
             eid,
         )
 
-        await edit_ui(callback.message, 
+        await edit_ui(
+            callback.message,
+
             "❌ <b>Payment create nahi ho paya.</b>\n\n"
 
             "Reason:\n"
-            f"<code>{str(e)[:1500]}</code>\n\n"
+            f"<code>{safe_html(str(e)[:1500])}</code>\n\n"
 
-            f"Error ID: <code>{eid}</code>"
+            f"Error ID: <code>{eid}</code>",
+
+            myplans_keyboard(),
         )
 
         return
@@ -2198,24 +2225,27 @@ async def buy_callback(
         "━━━━━━━━━━━━━━━━━━\n\n"
 
         f"📦 Plan: "
-        f"<b>{plan['name']}</b>\n"
+        f"<b>{safe_html(plan['name'])}</b>\n"
 
         f"💰 Amount: "
         f"<b>₹{plan['price']}</b>\n\n"
 
-        "👇 PayU checkout open karne ke liye "
-        "Pay Now dabao.\n\n"
+        "👇 <b>Pay Now</b> dabao aur PayU checkout "
+        "complete karo.\n\n"
 
         "Payment complete hone ke baad "
-        "Verify Payment press kar sakte ho.\n\n"
+        "<b>Verify Payment</b> press karo.\n\n"
 
-        f"🧾 Transaction:\n"
-        f"<code>{result['txn_id']}</code>"
+        "🛡️ Payment verify directly PayU se hoga.\n\n"
+
+        "🧾 Transaction:\n"
+        f"<code>{safe_html(result['txn_id'])}</code>"
     )
 
-    await edit_ui(callback.message, 
+    await edit_ui(
+        callback.message,
         text,
-        reply_markup=payment_keyboard(
+        payment_keyboard(
             result["checkout_url"],
             result["txn_id"],
         ),
@@ -2248,9 +2278,13 @@ async def verify_callback(
 
     if not order:
 
-        await edit_ui(callback.message, 
+        await edit_ui(
+            callback.message,
+
             "❌ <b>Order nahi mila.</b>\n\n"
-            "Transaction ID invalid ya purana ho sakta hai."
+            "Transaction ID invalid ya purana ho sakta hai.",
+
+            myplans_keyboard(),
         )
 
         return
@@ -2259,19 +2293,27 @@ async def verify_callback(
         order["user_id"]
     ) != callback.from_user.id:
 
-        await edit_ui(callback.message, 
-            "❌ Ye order aapka nahi hai."
+        await edit_ui(
+            callback.message,
+
+            "❌ <b>Ye order aapka nahi hai.</b>",
+
+            home_keyboard(),
         )
 
         return
 
-    if order.get(
-        "status"
-    ) == "paid":
+    if str(
+        order.get("status")
+    ).lower() == "paid":
 
-        await edit_ui(callback.message, 
+        await edit_ui(
+            callback.message,
+
             "✅ <b>Payment already confirmed.</b>\n\n"
-            "📋 /myplans"
+            "📋 Apne plans ke liye MY PLANS dabayein.",
+
+            myplans_keyboard(),
         )
 
         return
@@ -2293,17 +2335,22 @@ async def verify_callback(
             eid,
         )
 
-        await edit_ui(callback.message, 
+        await edit_ui(
+            callback.message,
+
             "⚠️ <b>Verification temporarily failed.</b>\n\n"
             "Thodi der baad dobara try karein.\n\n"
-            f"Error ID: <code>{eid}</code>"
+            f"Error ID: <code>{eid}</code>",
+
+            payment_keyboard(
+                "",
+                txn_id,
+            ),
         )
 
         return
 
-    if verification.get(
-        "ok"
-    ):
+    if verification.get("ok"):
 
         try:
 
@@ -2322,27 +2369,42 @@ async def verify_callback(
                 eid,
             )
 
-            await edit_ui(callback.message, 
+            await edit_ui(
+                callback.message,
+
                 "⚠️ PayU ne payment successful confirm kiya hai, "
                 "lekin access delivery mein problem aayi.\n\n"
-                f"Error ID: <code>{eid}</code>"
+                "Please Verify Payment dobara press karein.\n\n"
+                f"Error ID: <code>{eid}</code>",
+
+                myplans_keyboard(),
             )
 
             return
 
         if processed:
 
-            await edit_ui(callback.message, 
-                "🎉 <b>Payment Verified!</b>\n\n"
+            await edit_ui(
+                callback.message,
+
+                "🎉 <b>PAYMENT VERIFIED!</b>\n\n"
+                "✅ Payment successfully confirmed.\n"
                 "🔗 Access details Telegram par bhej di gayi hain.\n\n"
-                "📋 Apna plan dekhne ke liye /myplans use karein."
+                "📋 Apne active plans check karein.",
+
+                myplans_keyboard(),
             )
 
         else:
 
-            await edit_ui(callback.message, 
-                "⚠️ Payment verify hua, "
-                "lekin order process nahi ho saka."
+            await edit_ui(
+                callback.message,
+
+                "⚠️ <b>Payment verify hua, "
+                "lekin order process nahi ho saka.</b>\n\n"
+                "Please dobara Verify Payment karein.",
+
+                myplans_keyboard(),
             )
 
         return
@@ -2352,7 +2414,7 @@ async def verify_callback(
         "pending",
     )
 
-    message = str(
+    message_text = str(
         verification.get(
             "message"
         )
@@ -2366,89 +2428,68 @@ async def verify_callback(
             await update_order(
                 order["reference_id"],
                 {
-                    "status":
-                        "failed"
+                    "status": "failed"
                 },
             )
 
         except Exception:
             pass
 
-        await edit_ui(callback.message, 
+        await edit_ui(
+            callback.message,
+
             "❌ <b>Payment successful nahi mila.</b>\n\n"
-            f"PayU: <code>{message}</code>\n\n"
+            f"PayU: <code>{safe_html(message_text)}</code>\n\n"
             "Agar amount deduct hua hai to thodi der baad "
-            "Verify Payment dobara karein."
+            "Verify Payment dobara karein.",
+
+            myplans_keyboard(),
         )
 
         return
 
     if status == "error":
 
-        await edit_ui(callback.message, 
+        await edit_ui(
+            callback.message,
+
             "⚠️ <b>Verification abhi complete nahi hui.</b>\n\n"
-            f"Reason: <code>{message}</code>\n\n"
-            "Thodi der baad dobara try karein."
+            f"Reason: <code>{safe_html(message_text)}</code>\n\n"
+            "Thodi der baad dobara try karein.",
+
+            myplans_keyboard(),
         )
 
         return
 
-    await edit_ui(callback.message, 
+    await edit_ui(
+        callback.message,
+
         "⏳ <b>Payment abhi confirm nahi hua.</b>\n\n"
-        f"PayU: <code>{message}</code>\n\n"
-        "10–30 seconds baad Verify Payment dobara press karein."
+        f"PayU: <code>{safe_html(message_text)}</code>\n\n"
+        "10–30 seconds baad Verify Payment dobara press karein.",
+
+        myplans_keyboard(),
     )
 
 
 # ============================================================
-# MY PLANS — IMPORTANT FIX
+# MY PLANS
 # ============================================================
 
-async def send_my_plans(
-    *,
+async def build_my_plans_text(
     user_id: int,
-    chat_id: int,
 ):
-    """
-    IMPORTANT:
-    Never use callback.message.from_user.id here.
 
-    callback.message.from_user is the BOT.
-
-    Always use:
-        callback.from_user.id
-    """
-
-    try:
-
-        subscriptions = (
-            await get_user_active_subscriptions(
-                user_id
-            )
+    subscriptions = (
+        await get_user_active_subscriptions(
+            user_id
         )
-
-    except Exception as e:
-
-        logger.exception(
-            "My Plans DB error user=%s",
-            user_id,
-        )
-
-        await bot.send_message(
-            chat_id,
-            "⚠️ <b>My Plans load nahi ho paaye.</b>\n\n"
-            "Please thodi der baad dobara try karein.",
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # NO ACTIVE PLAN
-    # --------------------------------------------------------
+    )
 
     if not subscriptions:
 
-        text = (
+        return (
             "📋 <b>MY PLANS</b>\n"
             "━━━━━━━━━━━━━━━━━━\n\n"
 
@@ -2458,19 +2499,7 @@ async def send_my_plans(
             "subscription nahi hai.\n\n"
 
             "👇 Neeche se plan choose karke access le sakte ho."
-        )
-
-        await bot.send_message(
-            chat_id,
-            text,
-            reply_markup=home_keyboard(),
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # BUILD ACTIVE PLANS
-    # --------------------------------------------------------
+        ), myplans_keyboard()
 
     lines = [
         "📋 <b>MY PLANS</b>",
@@ -2508,13 +2537,9 @@ async def send_my_plans(
 
             try:
 
-                expires_int = int(
-                    expires_at
-                )
-
                 expiry_text = (
                     f"⏳ Expires: "
-                    f"<b>{format_ts(expires_int)}</b>"
+                    f"<b>{format_ts(expires_at)}</b>"
                 )
 
             except Exception:
@@ -2532,11 +2557,6 @@ async def send_my_plans(
         access_link = subscription.get(
             "access_link"
         )
-
-        # ----------------------------------------------------
-        # OLD SUBSCRIPTION LINK MISSING
-        # Generate it now.
-        # ----------------------------------------------------
 
         if not access_link:
 
@@ -2561,7 +2581,7 @@ async def send_my_plans(
             except Exception as e:
 
                 logger.warning(
-                    "Could not generate missing link "
+                    "Missing access link "
                     "subscription=%s error=%r",
                     subscription.get("id"),
                     e,
@@ -2570,7 +2590,7 @@ async def send_my_plans(
         lines.extend(
             [
                 f"🔹 <b>Plan {index}</b>",
-                f"📦 {plan_name}",
+                f"📦 {safe_html(plan_name)}",
                 "📌 Status: <b>ACTIVE</b>",
                 expiry_text,
             ]
@@ -2610,16 +2630,14 @@ async def send_my_plans(
         ]
     )
 
-    keyboard_rows = []
-
-    keyboard_rows.extend(
+    keyboard_rows = list(
         link_buttons
     )
 
     keyboard_rows.append(
         [
             InlineKeyboardButton(
-                text="🛒 Buy / Renew Plan",
+                text="🛒 BUY / RENEW PLAN",
                 callback_data="home",
             )
         ]
@@ -2628,26 +2646,90 @@ async def send_my_plans(
     keyboard_rows.append(
         [
             InlineKeyboardButton(
-                text="🔄 Refresh My Plans",
+                text="🔄 REFRESH",
                 callback_data="myplans",
             )
         ]
     )
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=keyboard_rows
+    return (
+        "\n".join(lines),
+        InlineKeyboardMarkup(
+            inline_keyboard=keyboard_rows
+        ),
     )
 
-    await bot.send_message(
-        chat_id,
-        "\n".join(lines),
+
+async def show_my_plans(
+    user_id: int,
+    message=None,
+):
+
+    try:
+
+        text, keyboard = (
+            await build_my_plans_text(
+                user_id
+            )
+        )
+
+    except Exception as e:
+
+        logger.exception(
+            "My Plans DB error user=%s",
+            user_id,
+        )
+
+        text = (
+            "⚠️ <b>MY PLANS LOAD FAILED</b>\n\n"
+            "Please thodi der baad dobara try karein."
+        )
+
+        keyboard = myplans_keyboard()
+
+    if message is not None:
+
+        await edit_ui(
+            message,
+            text,
+            keyboard,
+        )
+
+        UI_MESSAGES[
+            user_id
+        ] = message.message_id
+
+        return
+
+    old_message_id = UI_MESSAGES.get(
+        user_id
+    )
+
+    if old_message_id:
+
+        try:
+
+            await bot.delete_message(
+                chat_id=user_id,
+                message_id=old_message_id,
+            )
+
+        except Exception:
+            pass
+
+    sent = await bot.send_message(
+        user_id,
+        text,
         reply_markup=keyboard,
     )
 
+    UI_MESSAGES[
+        user_id
+    ] = sent.message_id
+
 
 # ============================================================
-# /myplan
-# /myplans
+# /MYPLAN
 # ============================================================
 
 @router.message(
@@ -2657,11 +2739,15 @@ async def myplan_command(
     message: Message,
 ):
 
-    await send_my_plans(
+    await show_my_plans(
         user_id=message.from_user.id,
-        chat_id=message.chat.id,
+        message=None,
     )
 
+
+# ============================================================
+# /MYPLANS
+# ============================================================
 
 @router.message(
     Command("myplans")
@@ -2670,14 +2756,14 @@ async def myplans_command(
     message: Message,
 ):
 
-    await send_my_plans(
+    await show_my_plans(
         user_id=message.from_user.id,
-        chat_id=message.chat.id,
+        message=None,
     )
 
 
 # ============================================================
-# MY PLANS CALLBACK — IMPORTANT FIX
+# MY PLANS CALLBACK
 # ============================================================
 
 @router.callback_query(
@@ -2688,24 +2774,18 @@ async def myplans_callback(
 ):
 
     await callback.answer(
-        "Aapke active plans load ho rahe hain..."
+        "Active plans load ho rahe hain..."
     )
 
-    # ========================================================
-    # CRITICAL FIX:
-    #
-    # WRONG:
-    # await send_my_plan(callback.message)
-    #
+    # IMPORTANT:
+    # callback.from_user = REAL USER
     # callback.message.from_user = BOT
     #
-    # CORRECT:
-    # callback.from_user.id = USER WHO CLICKED
-    # ========================================================
+    # Therefore ALWAYS use callback.from_user.id.
 
-    await send_my_plans(
+    await show_my_plans(
         user_id=callback.from_user.id,
-        chat_id=callback.from_user.id,
+        message=callback.message,
     )
 
 
@@ -2720,10 +2800,7 @@ async def broadcast_command(
     message: Message,
 ):
 
-    if (
-        message.from_user.id
-        not in ADMIN_IDS
-    ):
+    if message.from_user.id not in ADMIN_IDS:
 
         await message.answer(
             "❌ Admin only."
@@ -2746,9 +2823,15 @@ async def broadcast_command(
 
         return
 
-    broadcast_text = (
-        parts[1].strip()
-    )
+    broadcast_text = parts[1].strip()
+
+    if not broadcast_text:
+
+        await message.answer(
+            "❌ Broadcast message empty hai."
+        )
+
+        return
 
     users = await supabase_request(
         "GET",
@@ -2756,16 +2839,12 @@ async def broadcast_command(
         params={
             "select":
                 "user_id",
-
             "limit":
                 "10000",
         },
     )
 
-    if not isinstance(
-        users,
-        list,
-    ):
+    if not isinstance(users, list):
 
         await message.answer(
             "❌ Users fetch failed."
@@ -2777,7 +2856,7 @@ async def broadcast_command(
     failed = 0
 
     status_message = await message.answer(
-        "📢 Broadcast started..."
+        "📢 <b>Broadcast started...</b>"
     )
 
     for user in users:
@@ -2803,7 +2882,8 @@ async def broadcast_command(
             failed += 1
 
             logger.warning(
-                "Broadcast failed user=%s error=%r",
+                "Broadcast failed "
+                "user=%s error=%r",
                 user_id,
                 e,
             )
@@ -2830,10 +2910,7 @@ async def stats_command(
     message: Message,
 ):
 
-    if (
-        message.from_user.id
-        not in ADMIN_IDS
-    ):
+    if message.from_user.id not in ADMIN_IDS:
 
         await message.answer(
             "❌ Admin only."
@@ -2841,76 +2918,82 @@ async def stats_command(
 
         return
 
-    users = await supabase_request(
-        "GET",
-        "bot_users",
-        params={
-            "select":
-                "user_id",
+    try:
 
-            "limit":
-                "10000",
-        },
-    )
+        users = await supabase_request(
+            "GET",
+            "bot_users",
+            params={
+                "select": "user_id",
+                "limit": "10000",
+            },
+        )
 
-    orders = await supabase_request(
-        "GET",
-        "orders",
-        params={
-            "select":
-                "amount_paise,status",
+        orders = await supabase_request(
+            "GET",
+            "orders",
+            params={
+                "select":
+                    "amount_paise,status",
+                "limit":
+                    "10000",
+            },
+        )
 
-            "limit":
-                "10000",
-        },
-    )
+    except Exception as e:
+
+        eid = error_id()
+
+        logger.exception(
+            "[%s] Stats error",
+            eid,
+        )
+
+        await message.answer(
+            "❌ Stats load failed.\n\n"
+            f"Error ID: <code>{eid}</code>"
+        )
+
+        return
 
     total_users = (
         len(users)
-        if isinstance(
-            users,
-            list,
-        )
+        if isinstance(users, list)
         else 0
     )
 
     total_orders = (
         len(orders)
-        if isinstance(
-            orders,
-            list,
-        )
+        if isinstance(orders, list)
         else 0
     )
 
     paid_orders = 0
     revenue = 0.0
 
-    if isinstance(
-        orders,
-        list,
-    ):
+    if isinstance(orders, list):
 
         for order in orders:
 
-            if (
-                order.get(
-                    "status"
-                )
-                == "paid"
-            ):
+            if order.get(
+                "status"
+            ) == "paid":
 
                 paid_orders += 1
 
-                revenue += (
-                    int(
-                        order.get(
-                            "amount_paise",
-                            0,
-                        )
+                try:
+
+                    revenue += (
+                        int(
+                            order.get(
+                                "amount_paise",
+                                0,
+                            )
+                        ) / 100
                     )
-                    / 100
-                )
+
+                except Exception:
+                    pass
 
     await message.answer(
         "📊 <b>BOT STATS</b>\n"
@@ -3130,14 +3213,13 @@ content="width=device-width,initial-scale=1">
         )
 
     # --------------------------------------------------------
-    # Callback hash validation
+    # Validate callback hash if PayU supplied one.
+    # Direct verification is STILL performed below.
     # --------------------------------------------------------
 
     if data.get("hash"):
 
-        if not verify_payu_callback_hash(
-            data
-        ):
+        if not verify_payu_callback_hash(data):
 
             logger.error(
                 "Invalid PayU callback hash txn=%s",
@@ -3155,7 +3237,7 @@ content="width=device-width,initial-scale=1">
             txn_id
         )
 
-    except Exception as e:
+    except Exception:
 
         logger.exception(
             "Callback order lookup error"
@@ -3185,19 +3267,43 @@ content="width=device-width,initial-scale=1">
         )
 
     # --------------------------------------------------------
-    # Never trust browser callback status.
+    # If already paid, do not deliver twice.
+    # --------------------------------------------------------
+
+    if str(
+        order.get("status")
+    ).lower() == "paid":
+
+        return web.Response(
+            status=200,
+            content_type="text/html",
+            text="""
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport"
+content="width=device-width,initial-scale=1">
+<title>Payment Already Confirmed</title>
+</head>
+<body style="font-family:Arial;text-align:center;padding:40px">
+<h2>✅ Payment Already Confirmed</h2>
+<p>Your payment was already processed.</p>
+<p>Access details have been sent to Telegram.</p>
+</body>
+</html>
+""",
+        )
+
+    # --------------------------------------------------------
+    # NEVER trust browser callback status.
     # Verify directly with PayU.
     # --------------------------------------------------------
 
-    verification = (
-        await verify_payu_payment(
-            txn_id
-        )
+    verification = await verify_payu_payment(
+        txn_id
     )
 
-    if verification.get(
-        "ok"
-    ):
+    if verification.get("ok"):
 
         try:
 
@@ -3207,7 +3313,7 @@ content="width=device-width,initial-scale=1">
                 )
             )
 
-        except Exception as e:
+        except Exception:
 
             logger.exception(
                 "Callback delivery error"
@@ -3263,7 +3369,7 @@ content="width=device-width,initial-scale=1">
         "pending",
     )
 
-    message = str(
+    message_text = str(
         verification.get(
             "message"
         )
@@ -3277,8 +3383,7 @@ content="width=device-width,initial-scale=1">
             await update_order(
                 order["reference_id"],
                 {
-                    "status":
-                        "failed"
+                    "status": "failed"
                 },
             )
 
@@ -3298,7 +3403,7 @@ content="width=device-width,initial-scale=1">
 </head>
 <body style="font-family:Arial;text-align:center;padding:40px">
 <h2>❌ Payment Not Successful</h2>
-<p>{message}</p>
+<p>{safe_html(message_text)}</p>
 <p>Return to Telegram and try again.</p>
 </body>
 </html>
@@ -3318,7 +3423,7 @@ content="width=device-width,initial-scale=1">
 </head>
 <body style="font-family:Arial;text-align:center;padding:40px">
 <h2>⏳ Payment Verification Pending</h2>
-<p>{message}</p>
+<p>{safe_html(message_text)}</p>
 <p>Return to Telegram and press Verify Payment.</p>
 </body>
 </html>
@@ -3352,12 +3457,17 @@ async def payu_failure(
                 dict(request.query)
             )
 
-    except Exception:
-        pass
+    except Exception as e:
+
+        logger.warning(
+            "PayU failure callback parse error: %r",
+            e,
+        )
 
     txn_id = (
         data.get("txnid")
         or data.get("txnId")
+        or data.get("transactionId")
     )
 
     if txn_id:
@@ -3368,15 +3478,14 @@ async def payu_failure(
                 str(txn_id)
             )
 
-            if order:
+            if order and str(
+                order.get("status")
+            ).lower() != "paid":
 
                 await update_order(
-                    order[
-                        "reference_id"
-                    ],
+                    order["reference_id"],
                     {
-                        "status":
-                            "failed"
+                        "status": "failed"
                     },
                 )
 
@@ -3472,26 +3581,23 @@ async def expiry_watcher():
                     try:
 
                         plan = PLANS.get(
-                            sub[
-                                "plan_key"
-                            ],
+                            sub["plan_key"],
                             {},
                         )
 
                         await bot.send_message(
-
                             sub["user_id"],
 
                             "⌛ <b>PLAN EXPIRED</b>\n"
                             "━━━━━━━━━━━━━━━━━━\n\n"
 
                             f"📦 Plan: "
-                            f"<b>{plan.get('name', sub['plan_key'])}</b>\n\n"
+                            f"<b>{safe_html(plan.get('name', sub['plan_key']))}</b>\n\n"
 
                             "Aapka plan expire ho gaya hai.\n\n"
 
-                            "🔄 Renew karne ke liye /myplans "
-                            "ya /start use karein.",
+                            "🔄 Renew karne ke liye "
+                            "/myplans use karein.",
                         )
 
                     except Exception as e:
@@ -3513,17 +3619,14 @@ async def expiry_watcher():
                 )
 
                 if (
-                    remaining
-                    <= reminder_seconds
+                    remaining <= reminder_seconds
                     and not sub.get(
                         "reminder_sent"
                     )
                 ):
 
                     plan = PLANS.get(
-                        sub[
-                            "plan_key"
-                        ],
+                        sub["plan_key"],
                         {},
                     )
 
@@ -3538,20 +3641,18 @@ async def expiry_watcher():
                     try:
 
                         await bot.send_message(
-
                             sub["user_id"],
 
                             "⚠️ <b>PLAN EXPIRING SOON</b>\n"
                             "━━━━━━━━━━━━━━━━━━\n\n"
 
                             f"📦 Plan: "
-                            f"<b>{plan.get('name', sub['plan_key'])}</b>\n"
+                            f"<b>{safe_html(plan.get('name', sub['plan_key']))}</b>\n"
 
                             f"⏳ Expires: "
                             f"<b>{format_ts(expires_at)}</b>\n\n"
 
                             "Renew karna na bhoolna.\n\n"
-
                             "📋 /myplans → "
                             "🛒 Buy / Renew Plan",
                         )
@@ -3567,7 +3668,7 @@ async def expiry_watcher():
 
             raise
 
-        except Exception as e:
+        except Exception:
 
             logger.exception(
                 "Expiry watcher error"
@@ -3588,12 +3689,9 @@ async def health(
 
     return web.json_response(
         {
-            "ok":
-                True,
-
+            "ok": True,
             "service":
                 "dark-store-payu-bot",
-
             "time":
                 now_ts(),
         }
@@ -3704,7 +3802,7 @@ def validate_config():
             "ADMIN_IDS missing"
         )
 
-    if "YOUR-DOMAIN" in PUBLIC_BASE_URL:
+    if PUBLIC_BASE_URL and "YOUR-DOMAIN" in PUBLIC_BASE_URL:
         errors.append(
             "Replace PUBLIC_BASE_URL"
         )
@@ -3713,6 +3811,26 @@ def validate_config():
         errors.append(
             "Test PayU URL detected."
         )
+
+    if "api.payu.in" not in PAYU_URL.lower():
+        logger.warning(
+            "PAYU_URL does not look like PayU production URL: %s",
+            PAYU_URL,
+        )
+
+    for plan_key, plan in PLANS.items():
+
+        if int(plan["price"]) <= 0:
+
+            errors.append(
+                f"{plan_key} price must be greater than 0"
+            )
+
+        if int(plan["duration_days"]) < 0:
+
+            errors.append(
+                f"{plan_key} duration_days cannot be negative"
+            )
 
     if errors:
 
@@ -3807,6 +3925,7 @@ async def main():
             expiry_task.cancel()
 
             try:
+
                 await expiry_task
 
             except asyncio.CancelledError:

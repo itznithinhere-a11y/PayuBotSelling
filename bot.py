@@ -207,7 +207,7 @@ EXPIRY_REMINDER_HOURS = int(
 
 PLANS = {
     "gold": {
-        "name": "🥇 Gold Premium",
+        "name": "🥇 1 Year Premium",
         "price": int(
             os.getenv(
                 "GOLD_PRICE",
@@ -217,10 +217,10 @@ PLANS = {
         "duration_days": int(
             os.getenv(
                 "GOLD_DURATION_DAYS",
-                "30",
+                "365",
             )
         ),
-        "description": "Gold Premium Access",
+        "description": "1 Year Premium Access",
         "channel_id": os.getenv(
             "GOLD_CHANNEL_ID",
             "",
@@ -232,7 +232,7 @@ PLANS = {
     },
 
     "silver": {
-        "name": "🥈 Silver Premium",
+        "name": "♾️ Lifetime Premium",
         "price": int(
             os.getenv(
                 "SILVER_PRICE",
@@ -242,10 +242,10 @@ PLANS = {
         "duration_days": int(
             os.getenv(
                 "SILVER_DURATION_DAYS",
-                "30",
+                "0",
             )
         ),
-        "description": "Silver Premium Access",
+        "description": "Lifetime Premium Access",
         "channel_id": os.getenv(
             "SILVER_CHANNEL_ID",
             "",
@@ -1761,14 +1761,14 @@ def home_keyboard():
 
             [
                 InlineKeyboardButton(
-                    text="🥇 GOLD PREMIUM • ₹499",
+                    text="🥇 1 YEAR PREMIUM • ₹499",
                     callback_data="plan:gold",
                 ),
             ],
 
             [
                 InlineKeyboardButton(
-                    text="🥈 SILVER PREMIUM • ₹999",
+                    text="♾️ LIFETIME PREMIUM • ₹999",
                     callback_data="plan:silver",
                 ),
             ],
@@ -1791,9 +1791,9 @@ def plan_keyboard(
     ]
 
     if plan_key == "gold":
-        pay_text = "🥇 UNLOCK GOLD • ₹499"
+        pay_text = "🥇 UNLOCK 1 YEAR • ₹499"
     else:
-        pay_text = "🥈 UNLOCK SILVER • ₹999"
+        pay_text = "♾️ UNLOCK LIFETIME • ₹999"
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -1903,8 +1903,8 @@ async def send_home(
         "🚀 Automatic Verification\n\n"
 
         "💎 <b>CHOOSE YOUR PLAN</b>\n\n"
-        "🥇 <b>GOLD</b> — ₹499 / 30 Days\n"
-        "🥈 <b>SILVER</b> — ₹999 / 30 Days\n\n"
+        "🥇 <b>1 YEAR</b> — ₹499 / 365 Days\n"
+        "♾️ <b>LIFETIME</b> — ₹999 / Lifetime\n\n"
 
         "📌 Access automatically Telegram par deliver hoga.\n\n"
         f"💬 Support: {support}"
@@ -2008,13 +2008,13 @@ async def plan_callback(
     if plan_key == "gold":
         benefits = (
             "✨ Premium Channel Access\n"
-            "⚡ Fast Access Delivery\n"
+            "⚡ 1 Year Validity\n"
             "🛡 Secure PayU Payment"
         )
     else:
         benefits = (
             "💎 Premium Channel Access\n"
-            "🚀 Priority Access Delivery\n"
+            "♾️ Lifetime Validity\n"
             "🛡 Secure PayU Payment"
         )
 
